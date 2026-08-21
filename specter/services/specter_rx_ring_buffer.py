@@ -88,6 +88,26 @@ MQTT_PORT_DEFAULT       = 1883
 MQTT_KEEPALIVE          = 60
 MQTT_STATUS_INTERVAL    = 10       # seconds between heartbeats
 
+# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME   = "specter"
+MQTT_DEFAULT_PASSWORD   = "specter-change-me"
+
+
+def _mqtt_credentials() -> tuple:
+    """Read MQTT username/password from /etc/specter/specter.json (written
+    by the installer) if available, else fall back to the documented default."""
+    try:
+        cfg = json.loads((CONFIG_DIR / "specter.json").read_text())
+        mqtt_cfg = cfg.get("mqtt", {})
+        return (
+            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        )
+    except Exception:
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+
 TOPIC_STATUS     = "shtf/rx/status"
 TOPIC_EVENT      = "shtf/rx/event"
 TOPIC_RECORDING  = "shtf/rx/recording"
@@ -194,6 +214,7 @@ class MQTTClient:
             return
 
         client = mqtt.Client(client_id="specter_rx_ring_buffer")
+        client.username_pw_set(*_mqtt_credentials())
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message    = self._on_message

@@ -25,6 +25,12 @@ from pathlib import Path
 CONFIG_PATH = Path("/etc/specter/specter.json")
 VERSION = "1.0.0"
 
+# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
 TOPIC_SDR_STATUS  = "shtf/sdr/status"
 TOPIC_SDR_CMD     = "shtf/sdr/cmd"
 TOPIC_ALARM       = "shtf/system/alarm"
@@ -88,8 +94,10 @@ class SDRControlService:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
-        self.broker = mqtt_cfg.get("broker", "192.168.1.1")
-        self.port   = mqtt_cfg.get("port", 1883)
+        self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
+        self.port     = mqtt_cfg.get("port", 1883)
+        self.username = mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)
+        self.password = mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)
 
         self._devices   = {}
         self._procs:    dict[str, subprocess.Popen] = {}
@@ -150,6 +158,7 @@ class SDRControlService:
         import paho.mqtt.client as mqtt
 
         client = mqtt.Client(client_id="specter_sdr_control")
+        client.username_pw_set(self.username, self.password)
         client.on_connect = self._on_connect
         client.on_message = self._on_message
         self._client = client

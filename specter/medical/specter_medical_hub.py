@@ -25,6 +25,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Optional, Dict, Any
 import argparse
 
@@ -37,6 +38,28 @@ def _mqtt_client(client_id: str = ""):
         return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     except (AttributeError, TypeError):
         return _mqtt_client(client_id)
+# ---------------------------------------------------------------------------
+
+# --- MQTT auth --------------------------------------------------------------
+# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
+
+def _mqtt_credentials() -> tuple:
+    """Read MQTT username/password from /etc/specter/specter.json (written
+    by the installer) if available, else fall back to the documented default."""
+    try:
+        cfg = json.loads(Path("/etc/specter/specter.json").read_text())
+        mqtt_cfg = cfg.get("mqtt", {})
+        return (
+            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        )
+    except Exception:
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
 # ---------------------------------------------------------------------------
 import asyncio
 from bleak import BleakClient, BleakScanner
@@ -251,6 +274,7 @@ class MedicalHubBleCollector:
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_client = _mqtt_client()
+        self.mqtt_client.username_pw_set(*_mqtt_credentials())
         self.mqtt_connected = False
         self.discovered_devices = {}
         self.parser = MedicalDeviceParser()

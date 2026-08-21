@@ -27,6 +27,7 @@ import argparse
 import threading
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import requests
@@ -39,6 +40,28 @@ def _mqtt_client(client_id: str = ""):
         return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     except (AttributeError, TypeError):
         return _mqtt_client(client_id)
+# ---------------------------------------------------------------------------
+
+# --- MQTT auth --------------------------------------------------------------
+# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
+
+def _mqtt_credentials() -> tuple:
+    """Read MQTT username/password from /etc/specter/specter.json (written
+    by the installer) if available, else fall back to the documented default."""
+    try:
+        cfg = json.loads(Path("/etc/specter/specter.json").read_text())
+        mqtt_cfg = cfg.get("mqtt", {})
+        return (
+            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        )
+    except Exception:
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -557,6 +580,7 @@ class MedicalAIEngine:
         self.ollama = OllamaClient(cfg)
 
         self.mqtt = _mqtt_client("specter-medical-ai")
+        self.mqtt.username_pw_set(*_mqtt_credentials())
         self.mqtt.on_connect = self._on_connect
         self.mqtt.on_disconnect = self._on_disconnect
         self.mqtt.on_message = self._on_message

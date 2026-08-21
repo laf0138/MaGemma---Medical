@@ -24,13 +24,15 @@ Field-deployable emergency communications and medical command center.
 ## Fast start
 
 ```bash
-# Node 1 (master)
+# Node 1 (master) - set a real shared password first, see docs/MANUAL.md
+# Part 3.3; every other node's install must use the same one.
+export SPECTER_MQTT_PASSWORD='pick-a-real-password-here'
 sudo cp -r . /opt/specter/
 sudo python3 /opt/specter/deploy/install_specter.py
 
 # Verify
 bash /opt/specter/scripts/health_check.sh
-mosquitto_sub -h 192.168.1.1 -t 'shtf/#' -v
+mosquitto_sub -h 192.168.1.1 -u specter -P "$SPECTER_MQTT_PASSWORD" -t 'shtf/#' -v
 ```
 
 ## Try the trauma screens with no hardware

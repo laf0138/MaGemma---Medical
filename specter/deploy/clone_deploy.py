@@ -62,6 +62,7 @@ PACKAGES = {
             "/etc/systemd/system/specter-*.service",
             "/etc/systemd/system/specter-*.timer",
             "/etc/mosquitto/conf.d/specter.conf",
+            "/etc/mosquitto/specter_passwd",
             "/etc/udev/rules.d/99-specter-sdr.rules",
             "/etc/modprobe.d/specter-rtlsdr.conf",
             "/etc/cron.d/specter",

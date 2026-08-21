@@ -4,7 +4,9 @@
   "mqtt": {
     "broker": "192.168.1.1",
     "port": 1883,
-    "keepalive": 60
+    "keepalive": 60,
+    "username": "specter",
+    "password": "specter-change-me"
   },
   "network": {
     "pi1_ip": "192.168.1.1",

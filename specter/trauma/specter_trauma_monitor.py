@@ -16,6 +16,8 @@ import os
 import sys
 import json
 import argparse
+from pathlib import Path
+
 import paho.mqtt.client as mqtt
 
 # --- paho-mqtt 1.x / 2.x compatibility -------------------------------------
@@ -25,6 +27,26 @@ def _mqtt_client(client_id: str = ""):
         return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     except (AttributeError, TypeError):
         return _mqtt_client(client_id)
+# ---------------------------------------------------------------------------
+
+# --- MQTT auth --------------------------------------------------------------
+# See docs/MANUAL.md Part 3.3 - the broker requires auth.
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
+
+def _mqtt_credentials() -> tuple:
+    """Read MQTT username/password from /etc/specter/specter.json (written
+    by the installer) if available, else fall back to the documented default."""
+    try:
+        cfg = json.loads(Path("/etc/specter/specter.json").read_text())
+        mqtt_cfg = cfg.get("mqtt", {})
+        return (
+            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        )
+    except Exception:
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
 # ---------------------------------------------------------------------------
 
 # ANSI. Category is carried by label AND symbol, never color alone - same rule
@@ -64,7 +86,8 @@ def render(scene):
         lines.append(f"  {DIM}No active scene.{RESET}")
         lines.append("")
         lines.append(f"  {DIM}Open one:{RESET}")
-        lines.append(f"  {DIM}mosquitto_pub -t shtf/trauma/command/open_scene -m '{{}}'{RESET}")
+        lines.append(f"  {DIM}mosquitto_pub -u \"$MQTT_USER\" -P \"$MQTT_PASSWORD\" "
+                     f"-t shtf/trauma/command/open_scene -m '{{}}'{RESET}")
         lines.append("")
         return "\n".join(lines)
 
@@ -195,6 +218,7 @@ def main():
     args = ap.parse_args()
 
     client = _mqtt_client("specter-trauma-monitor")
+    client.username_pw_set(*_mqtt_credentials())
     client.on_connect = on_connect
     client.on_message = on_message
 

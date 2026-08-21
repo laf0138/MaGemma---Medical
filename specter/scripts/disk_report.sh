@@ -5,6 +5,11 @@
 BROKER="192.168.1.1"
 TOPIC="shtf/system/disk"
 
+# Broker requires auth (docs/MANUAL.md Part 3.3) - read the credential the
+# installer wrote to specter.json, falling back to the documented default.
+MQTT_USER=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('username','specter'))" 2>/dev/null || echo "specter")
+MQTT_PASS=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('password','specter-change-me'))" 2>/dev/null || echo "specter-change-me")
+
 LIVE_USED=$(df -h /mnt/specter/live  2>/dev/null | awk 'NR==2{print $3}')
 LIVE_AVAIL=$(df -h /mnt/specter/live 2>/dev/null | awk 'NR==2{print $4}')
 LIVE_PCT=$(df /mnt/specter/live      2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
@@ -37,10 +42,10 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
-mosquitto_pub -h "${BROKER}" -t "${TOPIC}" -m "${PAYLOAD}" 2>/dev/null || true
+mosquitto_pub -h "${BROKER}" -u "${MQTT_USER}" -P "${MQTT_PASS}" -t "${TOPIC}" -m "${PAYLOAD}" 2>/dev/null || true
 
 # Alarm if live storage > 85%
 if [ "${LIVE_PCT:-0}" -gt 85 ]; then
   ALARM="{\"source\":\"disk_report\",\"level\":\"warning\",\"msg\":\"Live storage ${LIVE_PCT}% full — archive or clear recordings\"}"
-  mosquitto_pub -h "${BROKER}" -t "shtf/system/alarm" -m "${ALARM}" 2>/dev/null || true
+  mosquitto_pub -h "${BROKER}" -u "${MQTT_USER}" -P "${MQTT_PASS}" -t "shtf/system/alarm" -m "${ALARM}" 2>/dev/null || true
 fi

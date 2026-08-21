@@ -106,7 +106,9 @@ for MNT in / /mnt/specter/live /mnt/specter/archive; do
 done
 
 head "MQTT BROKER"
-if mosquitto_sub -h 192.168.1.1 -t "shtf/system/heartbeat" -C 1 -W 3 >/dev/null 2>&1; then
+MQTT_USER=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('username','specter'))" 2>/dev/null || echo "specter")
+MQTT_PASS=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('password','specter-change-me'))" 2>/dev/null || echo "specter-change-me")
+if mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASS" -t "shtf/system/heartbeat" -C 1 -W 3 >/dev/null 2>&1; then
   ok "MQTT broker reachable and publishing"
 else
   warn "MQTT broker not responding within 3s"

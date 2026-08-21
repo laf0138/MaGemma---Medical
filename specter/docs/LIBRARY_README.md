@@ -130,16 +130,17 @@ specter-ask --categories
 ```
 
 ### MQTT (from any SPECTER service)
+The broker requires auth - see `docs/MANUAL.md` Part 3.3.
 ```bash
 # Ask a question
-mosquitto_pub -h 192.168.1.1 -t shtf/library/ask \
+mosquitto_pub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t shtf/library/ask \
   -m '{"query": "How do I build an expedient fallout shelter?"}'
 
 # Subscribe to answers
-mosquitto_sub -h 192.168.1.1 -t shtf/library/response -v
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t shtf/library/response -v
 
 # Library heartbeat
-mosquitto_sub -h 192.168.1.1 -t shtf/library/status -v
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t shtf/library/status -v
 ```
 
 ### Dashboard integration

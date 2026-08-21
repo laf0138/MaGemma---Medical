@@ -29,6 +29,12 @@ CONFIG_PATH = Path("/etc/specter/specter.json")
 DASHBOARD_DIR = Path(__file__).parent
 VERSION = "1.0.0"
 
+# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [specter-dash] %(message)s",
@@ -129,9 +135,13 @@ class DashboardMQTT:
         "shtf/system/state":    "_on_system_state",
     }
 
-    def __init__(self, broker: str, port: int):
-        self.broker = broker
-        self.port   = port
+    def __init__(self, broker: str, port: int,
+                 username: str = MQTT_DEFAULT_USERNAME,
+                 password: str = MQTT_DEFAULT_PASSWORD):
+        self.broker   = broker
+        self.port     = port
+        self.username = username
+        self.password = password
         self._client = None
 
     def _parse(self, payload: bytes) -> dict | str:
@@ -231,6 +241,7 @@ class DashboardMQTT:
     def start(self):
         import paho.mqtt.client as mqtt
         client = mqtt.Client(client_id="specter_dashboard")
+        client.username_pw_set(self.username, self.password)
         client.on_connect = lambda c, u, f, rc: (
             log.info("MQTT connected") or c.subscribe("shtf/#"))
         client.on_message = self._on_message
@@ -252,8 +263,10 @@ def main() -> int:
     port = dash_cfg.get("port", 5000)
 
     mqtt = DashboardMQTT(
-        broker = mqtt_cfg.get("broker", "192.168.1.1"),
-        port   = mqtt_cfg.get("port", 1883),
+        broker   = mqtt_cfg.get("broker", "192.168.1.1"),
+        port     = mqtt_cfg.get("port", 1883),
+        username = mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+        password = mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
     )
     mqtt.start()
 

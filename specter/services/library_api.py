@@ -47,6 +47,26 @@ VECTOR_INDEX    = Path(os.environ.get("VECTOR_INDEX_DIR", "/mnt/specter/library/
 MQTT_BROKER     = os.environ.get("MQTT_BROKER",        "192.168.1.1")
 API_PORT        = int(os.environ.get("LIBRARY_API_PORT", "5001"))
 
+# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
+# fallback credentials used only when specter.json has no mqtt.username/
+# mqtt.password (e.g. running outside a real install).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+
+
+def _mqtt_credentials() -> tuple:
+    """Read MQTT username/password from /etc/specter/specter.json (written
+    by the installer) if available, else fall back to the documented default."""
+    try:
+        specter_cfg = json.loads(Path("/etc/specter/specter.json").read_text())
+        mqtt_cfg = specter_cfg.get("mqtt", {})
+        return (
+            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
+            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        )
+    except Exception:
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+
 TOPIC_ASK       = "shtf/library/ask"
 TOPIC_RESPONSE  = "shtf/library/response"
 TOPIC_STATUS    = "shtf/library/status"
@@ -380,6 +400,7 @@ class LibraryMQTT:
         try:
             import paho.mqtt.client as mqtt
             client = mqtt.Client(client_id="specter_library_api")
+            client.username_pw_set(*_mqtt_credentials())
             client.on_connect = self._on_connect
             client.on_message = self._on_message
             client.connect(self.broker, 1883, 60)

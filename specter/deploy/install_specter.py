@@ -36,6 +36,17 @@ VERSION = "1.0.0"
 SPECTER_USER  = "specter"
 SPECTER_GROUP = "specter"
 
+# ─── MQTT broker credentials ──────────────────────────────────────────────────
+# The broker (Mosquitto) requires authentication - see docs/MANUAL.md Part 3.3.
+# Every node's install run must resolve to the SAME credential, since there is
+# no central secret store on an air-gapped mesh: export SPECTER_MQTT_PASSWORD
+# before running this installer on every node (Node 1 and every node cloned
+# from it via clone_deploy.py will then agree automatically).
+MQTT_DEFAULT_USERNAME = "specter"
+MQTT_DEFAULT_PASSWORD = "specter-change-me"
+MQTT_USERNAME = os.environ.get("SPECTER_MQTT_USER", MQTT_DEFAULT_USERNAME)
+MQTT_PASSWORD = os.environ.get("SPECTER_MQTT_PASSWORD", MQTT_DEFAULT_PASSWORD)
+
 # ─── Install paths ────────────────────────────────────────────────────────────
 BASE_DIR    = Path("/opt/specter")
 CONFIG_DIR  = Path("/etc/specter")
@@ -413,11 +424,13 @@ def write_configs(report: InstallReport) -> None:
     banner("PHASE 6 — WRITING CONFIG FILES")
 
     # MQTT / Mosquitto
+    mqtt_passwd_file = "/etc/mosquitto/specter_passwd"
     mosquitto_conf = CONFIG_DIR / "mosquitto.conf"
-    mosquitto_conf.write_text(textwrap.dedent("""\
+    mosquitto_conf.write_text(textwrap.dedent(f"""\
         # SPECTER MQTT Broker Config
         listener 1883 0.0.0.0
-        allow_anonymous true
+        allow_anonymous false
+        password_file {mqtt_passwd_file}
         persistence true
         persistence_location /var/lib/mosquitto/
         log_dest file /var/log/specter/mosquitto.log
@@ -427,12 +440,32 @@ def write_configs(report: InstallReport) -> None:
     shutil.copy2(mosquitto_conf, "/etc/mosquitto/conf.d/specter.conf")
     step("Mosquitto config written")
 
+    try:
+        subprocess.run(
+            ["mosquitto_passwd", "-b", "-c", mqtt_passwd_file, MQTT_USERNAME, MQTT_PASSWORD],
+            check=True, capture_output=True,
+        )
+        os.chmod(mqtt_passwd_file, 0o640)
+        shutil.chown(mqtt_passwd_file, group="mosquitto")
+        step("Mosquitto password file written")
+    except Exception as e:
+        warn(f"Could not generate mosquitto password file: {e}")
+
+    if MQTT_PASSWORD == MQTT_DEFAULT_PASSWORD:
+        warn(
+            "Using the DEFAULT MQTT password - every node must be installed with "
+            "the SAME password, so change it by exporting SPECTER_MQTT_PASSWORD "
+            "before running this installer on every node. See docs/MANUAL.md Part 3.3."
+        )
+
     # SPECTER main config
     specter_conf = {
         "version": VERSION,
         "mqtt": {
             "broker": "192.168.1.1",
             "port": 1883,
+            "username": MQTT_USERNAME,
+            "password": MQTT_PASSWORD,
         },
         "network": {
             "pi1_ip": "192.168.1.1",
@@ -472,6 +505,12 @@ def write_configs(report: InstallReport) -> None:
     }
     conf_path = CONFIG_DIR / "specter.json"
     conf_path.write_text(json.dumps(specter_conf, indent=2))
+    # Carries the MQTT password - not world-readable, but owned by the
+    # service user so specter-*.service units (which run as User=specter)
+    # can still read it. CONFIG_DIR itself is intentionally left out of the
+    # Phase 3 chown -R pass, so this file needs its own ownership fix.
+    shutil.chown(conf_path, user=SPECTER_USER, group=SPECTER_GROUP)
+    os.chmod(conf_path, 0o640)
     step(f"Main config: {conf_path}")
     report.files_deployed.append(str(conf_path))
 

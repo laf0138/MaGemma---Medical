@@ -197,6 +197,23 @@ Do not proceed until every node answers.
 
 ## 3.3 Node 1 — master
 
+**The broker requires authentication.** Pick one shared password and use it on
+*every* node - there is no central secret store on an air-gapped mesh, so a
+mismatched password on any one node just means that node silently can't talk
+to the broker. Export it before installing on each node:
+
+```bash
+export SPECTER_MQTT_USER=specter            # or your own username
+export SPECTER_MQTT_PASSWORD='pick-a-real-password-here'
+```
+
+If you skip this, every node falls back to the documented default
+(`specter` / `specter-change-me`) — fine for a first bring-up on a bench,
+but change it before this leaves the building. Nodes cloned from Node 1 via
+`clone_deploy.py` inherit the real credential automatically since they copy
+the actual `/etc/mosquitto/specter_passwd` and `/etc/specter/specter.json`
+files rather than re-deriving it.
+
 ```bash
 sudo apt update && sudo apt install -y mosquitto mosquitto-clients python3-venv git
 sudo mkdir -p /opt/specter /etc/specter /var/log/specter /var/lib/specter
@@ -205,18 +222,32 @@ sudo python3 -m venv /opt/specter/venv
 sudo /opt/specter/venv/bin/pip install paho-mqtt flask flask-socketio eventlet requests numpy
 
 # Broker config
-sudo tee /etc/specter/mosquitto.conf > /dev/null <<'EOF'
+MQTT_USER="${SPECTER_MQTT_USER:-specter}"
+MQTT_PASSWORD="${SPECTER_MQTT_PASSWORD:-specter-change-me}"
+
+sudo tee /etc/specter/mosquitto.conf > /dev/null <<EOF
 listener 1883 0.0.0.0
-allow_anonymous true
+allow_anonymous false
+password_file /etc/mosquitto/specter_passwd
 persistence true
 persistence_location /var/lib/mosquitto/
 log_dest file /var/log/specter/mosquitto.log
 max_queued_messages 10000
 EOF
 
+sudo mosquitto_passwd -b -c /etc/mosquitto/specter_passwd "$MQTT_USER" "$MQTT_PASSWORD"
+sudo chmod 640 /etc/mosquitto/specter_passwd
+sudo chown root:mosquitto /etc/mosquitto/specter_passwd
+
 # Service user
 sudo useradd -r -s /bin/false -G audio,dialout,plugdev specter 2>/dev/null || true
 sudo chown -R specter:specter /opt/specter /var/log/specter /var/lib/specter
+
+# specter.json needs the same credential so every service can authenticate -
+# see the "mqtt" block in config/specter.json and set username/password to
+# match $MQTT_USER / $MQTT_PASSWORD, then:
+sudo chown specter:specter /etc/specter/specter.json
+sudo chmod 640 /etc/specter/specter.json
 
 # Units
 sudo cp /opt/specter/systemd/specter-mqtt.service \
@@ -229,9 +260,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now specter-mqtt specter-coordinator specter-dashboard specter-thermal specter-trauma
 ```
 
+(Running `sudo python3 /opt/specter/deploy/install_specter.py` instead of
+these manual steps does all of the above automatically, including
+generating the password file and writing matching credentials into
+`specter.json` — see Part 3.4.)
+
 Verify:
 ```bash
-mosquitto_sub -h 127.0.0.1 -t 'shtf/#' -v    # should show heartbeats within 10s
+mosquitto_sub -h 127.0.0.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v    # should show heartbeats within 10s
 curl -s localhost:5000 | head -5              # dashboard responding
 ```
 
@@ -348,7 +384,7 @@ bluetoothctl
 From Node 1:
 ```bash
 bash /opt/specter/scripts/health_check.sh
-mosquitto_sub -h 192.168.1.1 -t 'shtf/#' -v | head -40
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v | head -40
 ```
 
 Expected within 60 seconds: heartbeats from every node, thermal readings, SDR device inventory, medical AI status `online`, trauma scene `scene_active: false`.
@@ -503,7 +539,7 @@ Two immunosuppressed patients, both on 28-day IV infusion schedules.
 
 ```bash
 touch /run/specter/sdr_trigger                    # manual capture
-mosquitto_pub -h 192.168.1.1 -t shtf/rx/trigger -m 'manual'   # remote trigger
+mosquitto_pub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t shtf/rx/trigger -m 'manual'   # remote trigger
 ```
 
 **FCC Part 97:** all transmissions require station call sign ID every 10 minutes and at end of transmission. This is implemented in the Node 6 TX automation and is **not optional**. SPECTER TX is for licensed amateur operators only. Receive-only operation carries no such requirement.
@@ -527,7 +563,7 @@ Node 1 last — other nodes buffer to it. Let the RX ring buffer finalize any in
 bash /opt/specter/scripts/health_check.sh          # full system report
 systemctl status 'specter-*'                        # what is running
 journalctl -u specter-<name> -n 50 --no-pager       # recent errors
-mosquitto_sub -h 192.168.1.1 -t 'shtf/#' -v         # is traffic flowing
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v         # is traffic flowing
 ```
 
 ## 6.2 MQTT
@@ -535,10 +571,11 @@ mosquitto_sub -h 192.168.1.1 -t 'shtf/#' -v         # is traffic flowing
 **Nothing is publishing.**
 ```bash
 systemctl status specter-mqtt
-sudo ss -tlnp | grep 1883                    # broker listening?
-mosquitto_pub -h 192.168.1.1 -t test -m hi   # broker accepting?
+sudo ss -tlnp | grep 1883                                              # broker listening?
+mosquitto_pub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t test -m hi   # broker accepting?
+mosquitto_pub -h 192.168.1.1 -t test -m hi                             # should be REJECTED - confirms auth is enforced
 ```
-If the broker is up but nodes are silent, the problem is network or per-node service. Check `ping` from each node to .1 first.
+If the broker is up but nodes are silent, the problem is network or per-node service. Check `ping` from each node to .1 first. If a service logs `MQTT connect refused (rc=5)` (`Not authorised`), its credential in `/etc/specter/specter.json` doesn't match `/etc/mosquitto/specter_passwd` on Node 1 - re-run the password step from Part 3.3 with the same `SPECTER_MQTT_PASSWORD` on both.
 
 **Reconnect storm — repeated "MQTT connected" every few seconds.** Two processes are sharing a client ID and kicking each other off.
 ```bash
@@ -595,7 +632,7 @@ ollama rm medgemma:27b
 
 **No vitals in the prompt.** The AI reports what it actually received. If it says vitals are unknown, the hub is not publishing:
 ```bash
-mosquitto_sub -h 192.168.1.1 -t 'shtf/medical/vitals/#' -v
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/medical/vitals/#' -v
 systemctl status specter-medical-hub          # on the Pi Zero
 ```
 
@@ -667,6 +704,7 @@ journalctl -u specter-thermal -n 100
 - ⚠️ **Medical hub** — BLE parsing for Omron, Masimo, Braun, Contour is written against published GATT specs but has **never been run against the actual devices**. Verify each parser before clinical use. Read a known value on the device, compare to what lands on MQTT.
 - ⚠️ **Medical AI engine** — logic is sound, but MedGemma output quality on your specific patient profiles is unverified. Run practice queries with known cases before you need it.
 - ⚠️ **Library RAG** — index builder exists; retrieval quality across the PDF corpus is untested.
+- ⚠️ **MQTT broker authentication** — the broker previously ran with `allow_anonymous true` and no password, meaning anyone on the wired LAN could read every patient's vitals/diagnosis in cleartext or publish a forged trauma command with nothing to reject it. Username/password auth (`allow_anonymous false` + `password_file`) is now wired through every service and the installer generates the password file automatically, but this has been verified with unit tests and code review only — **not yet exercised against a real multi-node mesh**. Before relying on it: confirm every node actually connects post-install (`journalctl -u specter-<name>` should show no `rc=5 Not authorised` errors), and confirm an unauthenticated `mosquitto_pub` is actually rejected (Part 6.2). Traffic is still unencrypted (no TLS) — this blocks casual/opportunistic access on the LAN, it does not defend against a device already trusted enough to hold the shared password.
 
 ## 7.3 Specified but not built
 
@@ -710,10 +748,10 @@ bash /opt/specter/scripts/health_check.sh
 systemctl status 'specter-*'
 journalctl -u 'specter-*' -f
 
-# MQTT
-mosquitto_sub -h 192.168.1.1 -t 'shtf/#' -v
-mosquitto_sub -h 192.168.1.1 -t 'shtf/medical/#' -v
-mosquitto_sub -h 192.168.1.1 -t 'shtf/trauma/#' -v
+# MQTT (requires -u/-P per Part 3.3)
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/medical/#' -v
+mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/trauma/#' -v
 
 # RF
 touch /run/specter/sdr_trigger
