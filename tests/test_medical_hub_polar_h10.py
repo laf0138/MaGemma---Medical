@@ -16,6 +16,7 @@ documented queue-item shapes:
 """
 import asyncio
 
+import neurokit2 as nk
 import pytest
 
 import medical.specter_medical_hub as hub_mod
@@ -175,6 +176,53 @@ class TestHeartRateCollection:
         result = asyncio.run(run())
         assert result["pulse"] == 74
         assert result["rr_intervals_ms"] == [820, 790]
+
+
+class TestEcgAnalysisWiring:
+    """Confirms _collect_polar_h10_stream actually hands its collected
+    waveform to medical.ecg_analysis.analyze_ecg_waveform and surfaces the
+    result - the two pieces are tested in isolation elsewhere
+    (test_ecg_analysis.py), this is the integration seam between them."""
+
+    def test_short_burst_adds_no_analysis_fields(self, hub):
+        # Too few samples for analyze_ecg_waveform to do anything with -
+        # must not crash, and must not fabricate analysis fields either.
+        async def run():
+            task = asyncio.ensure_future(
+                hub._collect_polar_h10_stream(object(), {"name": "Polar H10", "type": "polar_h10"})
+            )
+            await asyncio.sleep(0)
+            ecg_queue = FakePMD.instances[-1].ecg_queue
+            await ecg_queue.put(('ECG', 1_000_000, [1, 2, 3]))
+            return await task
+
+        result = asyncio.run(run())
+        assert result["ecg_waveform_uv"] == [1, 2, 3]
+        assert "ecg_qrs_duration_ms" not in result
+        assert "ecg_advisory_flags" not in result
+
+    def test_realistic_waveform_populates_analysis_fields(self, hub):
+        sr = hub_mod.POLAR_H10_ECG_SAMPLE_RATE_HZ
+        ecg_mv = nk.ecg_simulate(duration=15, sampling_rate=sr, heart_rate=75, noise=0.01, random_state=9)
+        samples = [int(round(x * 1000)) for x in ecg_mv]
+
+        async def run():
+            task = asyncio.ensure_future(
+                hub._collect_polar_h10_stream(object(), {"name": "Polar H10", "type": "polar_h10"})
+            )
+            await asyncio.sleep(0)
+            ecg_queue = FakePMD.instances[-1].ecg_queue
+            await ecg_queue.put(('ECG', 1_000_000, samples))
+            return await task
+
+        result = asyncio.run(run())
+        assert result["ecg_waveform_uv"] == samples
+        assert "ecg_qrs_duration_ms" in result
+        assert "ecg_r_wave_amplitude_uv" in result
+        assert "ecg_t_wave_amplitude_uv" in result
+        assert "ecg_t_r_ratio" in result
+        # A normal synthetic beat should not raise an advisory flag.
+        assert "ecg_advisory_flags" not in result
 
 
 class TestCollectFromDeviceDispatch:

@@ -1,6 +1,7 @@
 paho-mqtt
 bleak
 bleakheart
+neurokit2
 numpy
 requests
 flask

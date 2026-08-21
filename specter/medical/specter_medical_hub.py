@@ -77,6 +77,23 @@ from bleak import BleakClient, BleakScanner
 # device types, but it still requires a real-hardware smoke test first.
 from bleakheart import PolarMeasurementData, HeartRate
 
+# ecg_analysis.py is a sibling file in this same medical/ directory. When
+# this module is run directly as a script (the real deployment: systemd
+# launches `python3 /opt/specter/medical/specter_medical_hub.py`), Python
+# only puts that script's own directory on sys.path, so the bare import is
+# what resolves. Under pytest, specter/ itself is on sys.path (see
+# tests/conftest.py) and medical is imported as a package, so the
+# package-qualified form is what resolves there instead.
+try:
+    from medical.ecg_analysis import analyze_ecg_waveform
+except ImportError:
+    from ecg_analysis import analyze_ecg_waveform
+
+POLAR_H10_ECG_SAMPLE_RATE_HZ = 130  # H10 default per bleakheart's PMD docs;
+                                     # only correct as long as start_streaming
+                                     # ('ECG') below is called with no explicit
+                                     # SAMPLE_RATE override.
+
 # Logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -564,6 +581,25 @@ class MedicalHubBleCollector:
         result: Dict[str, Any] = {}
         if ecg_samples:
             result['ecg_waveform_uv'] = ecg_samples
+
+            analysis = analyze_ecg_waveform(ecg_samples, sampling_rate=POLAR_H10_ECG_SAMPLE_RATE_HZ)
+            if 'error' in analysis:
+                logger.info(f"Polar H10 ECG analysis skipped for {device_info['name']}: {analysis['error']}")
+            else:
+                if 'qrs_duration_ms' in analysis:
+                    result['ecg_qrs_duration_ms'] = analysis['qrs_duration_ms']
+                if 'r_wave_amplitude_uv' in analysis:
+                    result['ecg_r_wave_amplitude_uv'] = analysis['r_wave_amplitude_uv']
+                if 't_wave_amplitude_uv' in analysis:
+                    result['ecg_t_wave_amplitude_uv'] = analysis['t_wave_amplitude_uv']
+                if 't_r_ratio' in analysis:
+                    result['ecg_t_r_ratio'] = analysis['t_r_ratio']
+                if analysis.get('flags'):
+                    result['ecg_advisory_flags'] = analysis['flags']
+                    logger.warning(
+                        f"Polar H10 ECG advisory flag(s) for {device_info['name']}: {analysis['flags']}"
+                    )
+
         if latest_hr is not None:
             result['pulse'] = latest_hr
         if rr_intervals:
@@ -593,6 +629,11 @@ class MedicalHubBleCollector:
                         'ecg_rhythm': 'classification',
                         'ecg_waveform_uv': 'uV',
                         'rr_intervals_ms': 'ms',
+                        'ecg_qrs_duration_ms': 'ms',
+                        'ecg_r_wave_amplitude_uv': 'uV',
+                        'ecg_t_wave_amplitude_uv': 'uV',
+                        'ecg_t_r_ratio': 'ratio',
+                        'ecg_advisory_flags': 'text',
                     }
                     unit = unit_map.get(reading_type, 'unknown')
                     

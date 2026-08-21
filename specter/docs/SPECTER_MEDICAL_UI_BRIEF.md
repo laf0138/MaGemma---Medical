@@ -14,7 +14,7 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 
 ### 1.1 Raw — Bluetooth, automatic (medical hub, Pi Zero 2W)
 
-> **This table is stale relative to `docs/MANUAL.md` Part 7.4 — treat it as design intent, not current status.** The `ecg_rhythm` row below describes the AliveCor KardiaMobile 6L parser, which was **removed** for fabricating a BLE characteristic that doesn't exist. The four rows above it (Omron, Masimo, Braun, Contour) are shipped but **hard-blocked by default** — checked against Bluetooth SIG specs and found to very likely not match how these devices actually communicate, the same class of bug as the removed Kardia parser. `ecg_waveform_uv`/`rr_intervals_ms` are new: a real Polar H10 ECG/HR integration via the `bleakheart` library, also gated the same way pending real-hardware confirmation, and not yet consumed by any hyperkalemia-flagging logic (nothing renders or interprets the waveform clinically yet — it's data on MQTT, not a finding). None of the Bluetooth rows will actually populate on a fresh install until someone verifies the relevant device against real hardware. See Part 7.4 for specifics and how to unblock a device once confirmed.
+> **This table is stale relative to `docs/MANUAL.md` Part 7.4 — treat it as design intent, not current status.** The `ecg_rhythm` row below describes the AliveCor KardiaMobile 6L parser, which was **removed** for fabricating a BLE characteristic that doesn't exist. The four rows above it (Omron, Masimo, Braun, Contour) are shipped but **hard-blocked by default** — checked against Bluetooth SIG specs and found to very likely not match how these devices actually communicate, the same class of bug as the removed Kardia parser. The Polar H10 rows are new: a real ECG/HR integration via `bleakheart`, plus a NeuroKit2-based QRS/T-wave measurement layer (`medical/ecg_analysis.py`) on top of the raw waveform. All of it is still gated the same way pending real-hardware confirmation, and the derived `ecg_*` fields are **measurements with hedged advisory flags, not a diagnosis** — see Part 7.4 for the QRS-measurement caveat and why the T-wave flag is weaker than the QRS one. None of the Bluetooth rows will actually populate on a fresh install until someone verifies the relevant device against real hardware, and none of the `ecg_*` fields are wired into MedGemma's prompt yet — they reach MQTT, nothing reasons about them clinically.
 
 | Field | Unit | Source device | Cadence |
 |---|---|---|---|
@@ -26,6 +26,11 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 | `glucose_mg_dl` | mg/dL | Contour Next One | On measurement |
 | `ecg_waveform_uv` | µV, 130Hz samples | Polar H10 | Per collection cycle (`polar_stream_seconds`, default 10s) |
 | `rr_intervals_ms` | ms | Polar H10 | Per collection cycle |
+| `ecg_qrs_duration_ms` | ms | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_r_wave_amplitude_uv` | µV | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_t_wave_amplitude_uv` | µV | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_t_r_ratio` | ratio | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_advisory_flags` | text, hedged | Polar H10 (derived, NeuroKit2) | Per collection cycle, only when present |
 | `ecg_rhythm` | normal / afib / inconclusive / unreadable | ~~AliveCor KardiaMobile 6L~~ REMOVED, see Part 7.4 | On measurement |
 
 Per-reading metadata, all displayable: `device_name`, `timestamp_utc`, `rssi` (dBm), `battery_pct` (BLE characteristic 0x2A19).
