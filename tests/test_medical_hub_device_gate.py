@@ -14,7 +14,10 @@ doesn't have). A plausible-looking wrong vital sign is worse than no
 reading, so collect_from_device() now hard-blocks any device type not
 explicitly marked verified - these tests confirm that block actually
 prevents a BLE connection attempt, and that marking a device verified
-lifts it.
+lifts it. The gate applies uniformly to all five shipped device types,
+including polar_h10 (see test_medical_hub_polar_h10.py) - using a real
+library instead of hand-parsed bytes lowers the risk, it doesn't exempt
+a device from needing a real-hardware confirmation before trusting it.
 """
 import asyncio
 
@@ -75,7 +78,7 @@ class TestUnverifiedDevicesAreBlocked:
         assert result is None
         assert RecordingBleakClient.instances == []
 
-    def test_all_four_shipped_device_types_are_blocked_by_default(self, hub, monkeypatch):
+    def test_all_shipped_device_types_are_blocked_by_default(self, hub, monkeypatch):
         monkeypatch.setattr(hub_mod, "VERIFIED_DEVICE_TYPES", frozenset())
         for dev_type in hub_mod.BluetoothDeviceConfig.DEVICES:
             hub.discovered_devices["addr"] = {

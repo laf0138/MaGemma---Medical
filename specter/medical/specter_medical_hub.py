@@ -8,7 +8,8 @@ Collects data from multiple Bluetooth medical devices:
 - Masimo MightySat (pulse oximetry)
 - Braun ThermoScan 7 (temperature)
 - Contour Next One (glucose)
-- AliveCor KardiaMobile 6L (ECG)
+- Polar H10 (ECG waveform + heart rate, via the bleakheart library)
+- AliveCor KardiaMobile 6L (ECG) — REMOVED, see docs/MANUAL.md Part 7.4
 
 Publishes timestamped readings to MQTT broker on Node 1 (192.168.1.1)
 MQTT topics: shtf/medical/vitals/* 
@@ -68,6 +69,13 @@ def _mqtt_credentials() -> tuple:
 # ---------------------------------------------------------------------------
 import asyncio
 from bleak import BleakClient, BleakScanner
+# Polar H10 ECG/HR uses bleakheart (MPL-2.0), a maintained library for
+# Polar's PMD interface, instead of hand-parsed byte offsets - see the
+# VERIFIED DEVICE GATE comment above BluetoothDeviceConfig. Delegating the
+# protocol to a real, source-checked library is why polar_h10 is a much
+# lower-risk candidate to eventually mark verified than the other four
+# device types, but it still requires a real-hardware smoke test first.
+from bleakheart import PolarMeasurementData, HeartRate
 
 # Logging configuration
 logging.basicConfig(
@@ -212,6 +220,13 @@ class BluetoothDeviceConfig:
             },
             'parser': 'parse_contour_glucometer'
         },
+        'polar_h10': {
+            'name_pattern': 'Polar H10',
+            # Streams via bleakheart's PMD/HeartRate interfaces rather than
+            # a single characteristic_uuids/parser read - see
+            # collect_from_device() and _collect_polar_h10_stream().
+            'streaming': True,
+        },
     }
 
 
@@ -327,7 +342,8 @@ class MedicalDeviceParser:
 class MedicalHubBleCollector:
     """Scan for and collect data from Bluetooth medical devices"""
     
-    def __init__(self, mqtt_host: str = '192.168.1.1', mqtt_port: int = 1883):
+    def __init__(self, mqtt_host: str = '192.168.1.1', mqtt_port: int = 1883,
+                 polar_stream_seconds: int = 10):
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_client = _mqtt_client()
@@ -336,6 +352,7 @@ class MedicalHubBleCollector:
         self.discovered_devices = {}
         self.parser = MedicalDeviceParser()
         self.patient_id = "default"
+        self.polar_stream_seconds = polar_stream_seconds
         
         # MQTT callbacks
         self.mqtt_client.on_connect = self._on_mqtt_connect
@@ -436,10 +453,23 @@ class MedicalHubBleCollector:
         try:
             async with BleakClient(device) as client:
                 logger.info(f"Connected to {device_info['name']}")
-                
+
                 config = BluetoothDeviceConfig.DEVICES[dev_type]
+
+                if config.get('streaming'):
+                    parsed = await self._collect_polar_h10_stream(client, device_info)
+                    if parsed:
+                        return {
+                            'device_name': device_info['name'],
+                            'device_type': dev_type,
+                            'address': device_address,
+                            'rssi': device_info['rssi'],
+                            'readings': parsed
+                        }
+                    return None
+
                 readings = {}
-                
+
                 # Read all characteristics for this device
                 for char_name, char_uuid in config['characteristic_uuids'].items():
                     try:
@@ -448,7 +478,7 @@ class MedicalHubBleCollector:
                         logger.debug(f"Read {char_name} from {device_info['name']}: {data.hex()}")
                     except Exception as e:
                         logger.warning(f"Could not read {char_name} from {device_info['name']}: {e}")
-                
+
                 # Parse all readings
                 parser_func = getattr(self.parser, config['parser'], None)
                 if parser_func and readings:
@@ -460,11 +490,85 @@ class MedicalHubBleCollector:
                         'rssi': device_info['rssi'],
                         'readings': parsed
                     }
-        
+
         except Exception as e:
             logger.error(f"Error collecting from {device_info['name']}: {e}")
-        
+
         return None
+
+    async def _collect_polar_h10_stream(
+        self, client: BleakClient, device_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Stream ECG + heart rate from a Polar H10 for self.polar_stream_seconds
+        via bleakheart's PMD/HeartRate interfaces - a maintained library
+        that talks the real protocol, not hand-parsed byte offsets.
+
+        Returns a dict that may contain:
+          'ecg_waveform_uv':  list[int] microvolt samples, 130Hz (H10)
+          'pulse':            most recent average heart rate in bpm
+          'rr_intervals_ms':  list[int] RR intervals collected in the window
+        Any key may be absent if nothing arrived during the window (e.g.
+        poor skin contact for HR, or the strap not yet settled) - this is
+        normal and the caller (collect_from_device) already treats an
+        empty/partial dict as "no reading this cycle", not an error.
+        """
+        ecg_queue: asyncio.Queue = asyncio.Queue()
+        hr_queue: asyncio.Queue = asyncio.Queue()
+
+        pmd = PolarMeasurementData(client, ecg_queue=ecg_queue)
+        # unpack=False: each queue item already carries the full RR list
+        # for that frame, rather than bleakheart splitting it into one
+        # queue item per heartbeat - simpler and less ambiguous to consume.
+        hr = HeartRate(client, queue=hr_queue, unpack=False)
+
+        err, err_msg, _raw = await pmd.start_streaming('ECG')
+        if err != 0:
+            logger.error(f"Polar H10 ECG stream start failed for {device_info['name']}: {err_msg}")
+            return {}
+        await hr.start_notify()
+
+        ecg_samples: list = []
+        rr_intervals: list = []
+        latest_hr = None
+        deadline = time.monotonic() + self.polar_stream_seconds
+
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    dtype, _tstamp, payload = await asyncio.wait_for(
+                        ecg_queue.get(), timeout=remaining
+                    )
+                    if dtype == 'ECG':
+                        ecg_samples.extend(payload)
+                except asyncio.TimeoutError:
+                    pass
+
+                while not hr_queue.empty():
+                    _dtype, _tstamp, (avg_hr, rr_list), _energy = hr_queue.get_nowait()
+                    latest_hr = avg_hr
+                    rr_intervals.extend(rr_list)
+        finally:
+            try:
+                await pmd.stop_streaming('ECG')
+            except Exception as e:
+                logger.warning(f"Error stopping Polar H10 ECG stream: {e}")
+            try:
+                await hr.stop_notify()
+            except Exception as e:
+                logger.warning(f"Error stopping Polar H10 HR notifications: {e}")
+
+        result: Dict[str, Any] = {}
+        if ecg_samples:
+            result['ecg_waveform_uv'] = ecg_samples
+        if latest_hr is not None:
+            result['pulse'] = latest_hr
+        if rr_intervals:
+            result['rr_intervals_ms'] = rr_intervals
+        return result
     
     async def collect_all_devices(self) -> PatientVitals:
         """Collect vitals from all discovered devices, return PatientVitals object"""
@@ -486,7 +590,9 @@ class MedicalHubBleCollector:
                         'temperature_c': '°C',
                         'temperature_f': '°F',
                         'glucose_mg_dl': 'mg/dL',
-                        'ecg_rhythm': 'classification'
+                        'ecg_rhythm': 'classification',
+                        'ecg_waveform_uv': 'uV',
+                        'rr_intervals_ms': 'ms',
                     }
                     unit = unit_map.get(reading_type, 'unknown')
                     

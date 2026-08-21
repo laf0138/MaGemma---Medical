@@ -14,16 +14,18 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 
 ### 1.1 Raw — Bluetooth, automatic (medical hub, Pi Zero 2W)
 
-> **This table is stale relative to `docs/MANUAL.md` Part 7.4 — treat it as design intent, not current status.** The `ecg_rhythm` row below describes the AliveCor KardiaMobile 6L parser, which was **removed** for fabricating a BLE characteristic that doesn't exist. The other five BLE rows (Omron, Masimo, Braun, Contour) are shipped but **hard-blocked by default** — checked against Bluetooth SIG specs and found to very likely not match how these devices actually communicate, the same class of bug as the removed Kardia parser. None of these fields will actually populate on a fresh install until someone verifies the relevant parser against real hardware. See Part 7.4 for specifics and how to unblock a device once confirmed.
+> **This table is stale relative to `docs/MANUAL.md` Part 7.4 — treat it as design intent, not current status.** The `ecg_rhythm` row below describes the AliveCor KardiaMobile 6L parser, which was **removed** for fabricating a BLE characteristic that doesn't exist. The four rows above it (Omron, Masimo, Braun, Contour) are shipped but **hard-blocked by default** — checked against Bluetooth SIG specs and found to very likely not match how these devices actually communicate, the same class of bug as the removed Kardia parser. `ecg_waveform_uv`/`rr_intervals_ms` are new: a real Polar H10 ECG/HR integration via the `bleakheart` library, also gated the same way pending real-hardware confirmation, and not yet consumed by any hyperkalemia-flagging logic (nothing renders or interprets the waveform clinically yet — it's data on MQTT, not a finding). None of the Bluetooth rows will actually populate on a fresh install until someone verifies the relevant device against real hardware. See Part 7.4 for specifics and how to unblock a device once confirmed.
 
 | Field | Unit | Source device | Cadence |
 |---|---|---|---|
 | `bp_systolic` | mmHg | Omron BP7450 | On measurement |
 | `bp_diastolic` | mmHg | Omron BP7450 | On measurement |
-| `pulse` | bpm | Omron / Masimo | On measurement / 5–10 s |
+| `pulse` | bpm | Omron / Masimo / Polar H10 | On measurement / 5–10 s |
 | `spo2` | % | Masimo MightySat | 5–10 s |
 | `temperature_c` | °C | Braun ThermoScan 7 | On measurement |
 | `glucose_mg_dl` | mg/dL | Contour Next One | On measurement |
+| `ecg_waveform_uv` | µV, 130Hz samples | Polar H10 | Per collection cycle (`polar_stream_seconds`, default 10s) |
+| `rr_intervals_ms` | ms | Polar H10 | Per collection cycle |
 | `ecg_rhythm` | normal / afib / inconclusive / unreadable | ~~AliveCor KardiaMobile 6L~~ REMOVED, see Part 7.4 | On measurement |
 
 Per-reading metadata, all displayable: `device_name`, `timestamp_utc`, `rssi` (dBm), `battery_pct` (BLE characteristic 0x2A19).

@@ -1,5 +1,6 @@
 paho-mqtt
 bleak
+bleakheart
 numpy
 requests
 flask
