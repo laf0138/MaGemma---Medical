@@ -115,11 +115,19 @@ GLUCOSE_MOLL_TO_MGDL = GLUCOSE_MOLAR_MASS_G_PER_MOL * 100
 GLUCOSE_KGL_TO_MGDL = 100_000
 
 # Logging configuration
+# SPECTER_LOG lets this be overridden (tests/conftest.py points it at a
+# tmp file) - every other module in this project already does this
+# (specter_trauma.py, specter_medical_ai.py). This one hardcoded
+# /var/log/specter_medical_hub.log directly, which the real install
+# writes fine as root but any non-root import (including every GitHub
+# Actions run on this repo, checked - every single CI run on this branch
+# failed at collection with PermissionError on this exact line) cannot
+# create at all, since /var/log isn't writable and the file doesn't exist.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/var/log/specter_medical_hub.log'),
+        logging.FileHandler(os.environ.get('SPECTER_LOG', '/var/log/specter_medical_hub.log')),
         logging.StreamHandler()
     ]
 )
