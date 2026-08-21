@@ -3,4 +3,6 @@ bleak
 numpy
 requests
 flask
+flask-socketio
+eventlet
 pytest
