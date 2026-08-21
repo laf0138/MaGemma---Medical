@@ -221,6 +221,63 @@ class TestOnSystemState:
         assert ds.STATE["system"] == before
 
 
+class TestOnWardEpisode:
+    def test_dict_payload_relays_episodes_and_stamps_updated(self, mqtt):
+        episodes = [{"episode_id": "W-1", "patient_id": "p1"}]
+        mqtt._on_ward_episode("shtf/ward/episode", {
+            "timestamp_utc": "2026-01-01T00:00:00+00:00", "episodes": episodes,
+        })
+        assert ds.STATE["ward"]["episodes"] == episodes
+        assert ds.STATE["ward"]["updated"] > 0
+        assert mqtt.pushed == [("ward_episode", ds.STATE["ward"])]
+
+    def test_non_dict_payload_leaves_state_untouched(self, mqtt):
+        before = dict(ds.STATE["ward"])
+        mqtt._on_ward_episode("shtf/ward/episode", "garbage")
+        assert ds.STATE["ward"] == before
+
+
+class TestOnWardAlert:
+    def test_list_payload_feeds_each_alert_through_on_alarm(self, mqtt):
+        mqtt._on_ward_alert("shtf/ward/alert", [
+            {"level": "critical", "text": "Reposition overdue by 40m"},
+            {"level": "caution", "text": "No mobility logged in 25.0h"},
+        ])
+        assert len(ds.STATE["alarms"]) == 2
+        assert ds.STATE["alarms"][0]["data"]["text"] == "Reposition overdue by 40m"
+
+    def test_non_list_payload_does_not_raise(self, mqtt):
+        mqtt._on_ward_alert("shtf/ward/alert", "garbage")
+        assert ds.STATE["alarms"] == []
+
+
+class TestPublishWardCommand:
+    """The dashboard MQTT credential is deliberately read-only across
+    shtf/# except one narrow write exception for shtf/ward/command/# (see
+    deploy/install_specter.py's ACL comment) - publish_ward_command is the
+    only path that's allowed to use it, and only for known ward commands."""
+
+    def test_publishes_to_correct_topic(self, mqtt):
+        published = []
+        mqtt._client = type("FakeClient", (), {
+            "publish": lambda self, topic, payload, qos=0: published.append((topic, payload, qos))
+        })()
+        result = mqtt.publish_ward_command("complete_task", {"episode_id": "W-1", "task_id": "W-1-T1"})
+        assert result is True
+        assert len(published) == 1
+        topic, payload, qos = published[0]
+        assert topic == "shtf/ward/command/complete_task"
+        assert json.loads(payload) == {"episode_id": "W-1", "task_id": "W-1-T1"}
+
+    def test_rejects_unknown_command(self, mqtt):
+        mqtt._client = type("FakeClient", (), {"publish": lambda self, *a, **k: None})()
+        assert mqtt.publish_ward_command("delete_everything", {}) is False
+
+    def test_returns_false_when_mqtt_not_connected(self, mqtt):
+        mqtt._client = None
+        assert mqtt.publish_ward_command("intake", {"episode_id": "W-1"}) is False
+
+
 class _FakeMqttClient:
     def subscribe(self, *a, **k):
         pass
@@ -340,6 +397,11 @@ class TestHttpRoutes:
         # were ever routed - the file was only reachable (if at all) via
         # Flask's static handler at a different, undocumented URL.
         resp = client.get("/resus", auth=auth)
+        assert resp.status_code == 200
+        assert b"<html" in resp.data.lower()
+
+    def test_ward_route_serves_ward_html(self, client, auth):
+        resp = client.get("/ward", auth=auth)
         assert resp.status_code == 200
         assert b"<html" in resp.data.lower()
 

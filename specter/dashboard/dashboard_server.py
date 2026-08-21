@@ -124,11 +124,17 @@ STATE: dict = {
     "tx": {"status": "idle", "frequency": None},
     "sdr": {"devices": {}},
     "thermal": {"cpu_temp_c": 0, "throttle": {}},
+    "ward": {"episodes": [], "updated": 0},
     "alarms": [],
     "system": {"uptime": 0, "version": VERSION},
     "mqtt_connected": False,
 }
 STATE_LOCK = threading.Lock()
+
+# Set by main() once the real DashboardMQTT instance exists - the
+# ward_command Socket.IO handler needs to reach it to publish. None in
+# tests/anything that imports this module without running main().
+_dashboard_mqtt = None
 
 # ─── Flask / SocketIO ─────────────────────────────────────────────────────────
 
@@ -150,6 +156,13 @@ app.config["SECRET_KEY"] = cfg.get("dashboard", {}).get("secret_key") or secrets
 socketio = SocketIO(
     app,
     cors_allowed_origins=cfg.get("dashboard", {}).get("cors_allowed_origins"),
+    # eventlet itself is in maintenance-only mode upstream (its own import
+    # emits EventletDeprecationWarning - visible in this project's own test
+    # output). Not an immediate break, but flask-socketio's other
+    # production async_mode options (gevent, or threading for lower
+    # concurrency) should replace it before eventlet stops receiving
+    # security fixes - tracked in docs/MANUAL.md Part 7.2, not silently
+    # left as a warning nobody owns.
     async_mode="eventlet",
 )
 
@@ -184,6 +197,14 @@ def resus():
     return "<h1>SPECTER RESUS</h1><p>resus.html not found.</p>", 404
 
 
+@app.route("/ward")
+def ward():
+    html_path = DASHBOARD_DIR / "ward.html"
+    if html_path.exists():
+        return html_path.read_text()
+    return "<h1>SPECTER WARD</h1><p>ward.html not found.</p>", 404
+
+
 @app.route("/api/state")
 def api_state():
     with STATE_LOCK:
@@ -216,6 +237,29 @@ def on_connect():
     return None
 
 
+@socketio.on("ward_command")
+def on_ward_command(data):
+    """
+    Real write-back path for WARD mode (unlike RESUS/trigger_rx, this
+    reaches the actual ward service over MQTT, not a local file/demo
+    state) - see the ACL note on the "dashboard" service in
+    deploy/install_specter.py's MQTT_SERVICES for why this credential is
+    allowed to write exactly shtf/ward/command/# and nothing else.
+    Already behind this connection's Basic-Auth-gated on_connect check;
+    publish_ward_command() adds its own allowlist on top of the broker
+    ACL as defense in depth.
+    """
+    if not isinstance(data, dict) or "cmd" not in data:
+        log.warning("Malformed ward_command payload: %r", data)
+        return
+    cmd = data["cmd"]
+    payload = {k: v for k, v in data.items() if k != "cmd"}
+    if _dashboard_mqtt is None:
+        log.warning("ward_command %s dropped - MQTT not initialized", cmd)
+        return
+    _dashboard_mqtt.publish_ward_command(cmd, payload)
+
+
 @socketio.on("trigger_rx")
 def on_trigger_rx():
     """Operator presses RX capture button on dashboard."""
@@ -242,6 +286,8 @@ class DashboardMQTT:
         "shtf/system/thermal":  "_on_thermal",
         "shtf/system/alarm":    "_on_alarm",
         "shtf/system/state":    "_on_system_state",
+        "shtf/ward/episode":    "_on_ward_episode",
+        "shtf/ward/alert":      "_on_ward_alert",
     }
 
     def __init__(self, broker: str, port: int,
@@ -343,6 +389,22 @@ class DashboardMQTT:
             if isinstance(data, dict):
                 STATE["system"].update(data)
 
+    def _on_ward_episode(self, topic: str, data):
+        # WardService publishes the full open-episode summary retained on
+        # shtf/ward/episode (specter_ward.py's WardService._publish_all) -
+        # relay it straight through rather than reshaping it here, so the
+        # UI's episode shape stays defined in exactly one place.
+        with STATE_LOCK:
+            if isinstance(data, dict):
+                STATE["ward"]["episodes"] = data.get("episodes", [])
+                STATE["ward"]["updated"] = time.time()
+        self._push("ward_episode", STATE["ward"])
+
+    def _on_ward_alert(self, topic: str, data):
+        if isinstance(data, list):
+            for alert in data:
+                self._on_alarm(topic, alert)
+
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
         data  = self._parse(msg.payload)
@@ -377,6 +439,30 @@ class DashboardMQTT:
     def _on_broker_disconnect(self, client, userdata, rc):
         log.warning("MQTT disconnected (rc=%s)", rc)
         self._set_mqtt_connected(False)
+
+    # Commands the browser is allowed to trigger via ward_command - an
+    # extra allowlist on top of the broker ACL (which already restricts
+    # this credential's write access to exactly shtf/ward/command/#),
+    # since a typo'd or attacker-supplied cmd string should be rejected
+    # here rather than trusted through to a raw topic join.
+    WARD_COMMANDS = {
+        "open_episode", "close_episode", "intake", "output", "add_care_task",
+        "complete_task", "skin_check", "nutrition", "mobility", "vitals",
+    }
+
+    def publish_ward_command(self, cmd: str, payload: dict) -> bool:
+        if cmd not in self.WARD_COMMANDS:
+            log.warning("Rejected unknown ward_command: %r", cmd)
+            return False
+        if not self._client:
+            log.warning("Cannot publish ward command %s - MQTT not connected", cmd)
+            return False
+        try:
+            self._client.publish(f"shtf/ward/command/{cmd}", json.dumps(payload), qos=1)
+            return True
+        except Exception as e:
+            log.warning("Failed to publish ward command %s: %s", cmd, e)
+            return False
 
     def start(self):
         import paho.mqtt.client as mqtt
@@ -438,6 +524,8 @@ def main() -> int:
         username = mqtt_username,
         password = mqtt_password,
     )
+    global _dashboard_mqtt
+    _dashboard_mqtt = mqtt
     mqtt.start()
 
     def _stop(sig, frame):

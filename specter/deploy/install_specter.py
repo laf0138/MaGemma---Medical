@@ -68,6 +68,15 @@ MQTT_SERVICES: dict[str, dict] = {
             ("write", "shtf/trauma/protocol"),
         ],
     },
+    "ward": {
+        "username": "specter-ward",
+        "acl": [
+            ("read", "shtf/ward/command/#"),
+            ("write", "shtf/ward/episode"),
+            ("write", "shtf/ward/episode/#"),
+            ("write", "shtf/ward/alert"),
+        ],
+    },
     "medical_ai": {
         "username": "specter-medical-ai",
         "acl": [
@@ -115,9 +124,19 @@ MQTT_SERVICES: dict[str, dict] = {
     "dashboard": {
         "username": "specter-dashboard",
         "acl": [
-            # Same reasoning as coordinator: broad READ to drive the UI,
-            # zero WRITE - a leaked dashboard credential can only observe.
+            # Same reasoning as coordinator: broad READ to drive the UI.
             ("read", "shtf/#"),
+            # One deliberate, narrow WRITE exception: WARD mode's care-task
+            # completion / intake-output logging / vitals recording needs
+            # a real write-back path (unlike RESUS, which stays read-only/
+            # demo for now - see docs/MANUAL.md Part 7.2). This grants
+            # exactly shtf/ward/command/#, nothing else - a leaked
+            # dashboard credential still cannot forge a trauma command,
+            # touch medical topics, or write anywhere outside this one
+            # namespace. The write path itself is also gated behind the
+            # dashboard's own HTTP Basic Auth (Part 7.4) before it ever
+            # reaches this MQTT publish.
+            ("write", "shtf/ward/command/#"),
         ],
     },
     "library_api": {
