@@ -355,10 +355,25 @@ sudo /opt/specter/venv/bin/python /opt/specter/medical/specter_medical_ai.py \
 
 ## 3.7 Medical hub — Pi Zero 2W
 
+**Read Part 7.4 before wiring up any actual device.** Every shipped BLE
+device parser (Omron, Masimo, Braun, Contour) is hard-blocked by default -
+the hub will discover paired devices but publish zero vitals for them
+until you've confirmed the parser against real captured traffic and added
+the device to `SPECTER_VERIFIED_BLE_DEVICES`. This is not a
+"finish the paperwork later" gap: the parsers as shipped were checked
+against Bluetooth SIG specs and look like the same class of bug as the
+removed KardiaMobile parser.
+
 ```bash
 sudo apt install -y python3-venv bluez
 sudo python3 -m venv /opt/specter/venv
 sudo /opt/specter/venv/bin/pip install paho-mqtt bleak
+
+# Only once you've verified a device's parser against real hardware:
+# sudo systemctl edit specter-medical-hub
+#   [Service]
+#   Environment=SPECTER_VERIFIED_BLE_DEVICES=omron_bp7450,contour_next_one
+
 sudo cp /opt/specter/systemd/specter-medical-hub.service /etc/systemd/system/
 sudo systemctl enable --now specter-medical-hub
 ```
@@ -642,7 +657,9 @@ journalctl -u specter-medical-hub -f
 ```
 Devices must be paired and trusted once via `bluetoothctl` before the hub can read them. Bluetooth range on the Pi Zero 2W is short — keep instruments within about 3 meters.
 
-**Readings look wrong.** Check the RSSI in the payload. Below −80 dBm the connection is marginal and parse errors follow.
+**Device is discovered but no vitals ever publish.** This is very likely the verification gate (Part 7.4), not a Bluetooth problem — check the startup log for `UNVERIFIED DEVICE PARSERS BLOCKED`. Every shipped parser is blocked until its `dev_type` is added to `SPECTER_VERIFIED_BLE_DEVICES`. This is the expected, safe default, not a bug to work around.
+
+**Readings look wrong** (only possible once a device has been deliberately verified and unblocked). Check the RSSI in the payload first — below −80 dBm the connection is marginal and parse errors follow. If RSSI is fine and the numbers are still implausible, the parser itself is suspect: re-capture real characteristic data from the device and re-check it against the parser before trusting it further.
 
 ## 6.6 Library
 
@@ -697,7 +714,7 @@ journalctl -u specter-thermal -n 100
 
 ## 7.2 Built, not yet tested against real hardware
 
-- ⚠️ **Medical hub** — BLE parsing for Omron, Masimo, Braun, Contour is written against published GATT specs but has **never been run against the actual devices**. Verify each parser before clinical use. Read a known value on the device, compare to what lands on MQTT.
+- ⚠️ **Medical hub** — see Part 7.4. All four device parsers are now hard-blocked by default pending real-hardware verification, not merely untested.
 - ⚠️ **Medical AI engine** — logic is sound, but MedGemma output quality on your specific patient profiles is unverified. Run practice queries with known cases before you need it.
 - ⚠️ **Library RAG** — index builder exists; retrieval quality across the PDF corpus is untested.
 - ⚠️ **MQTT broker authentication and per-service ACLs** — the broker previously ran with `allow_anonymous true` and no password: anyone on the wired LAN could read every patient's vitals/diagnosis in cleartext or publish a forged trauma command with nothing to reject it. It now requires auth, with a **separate least-privilege account per service** (see `MQTT_SERVICES` in `deploy/install_specter.py`) rather than one shared login, so a leaked dashboard credential can't be used to forge a trauma command - the ACL file only lets it read. All of this is wired through every service and generated automatically by the installer, but has been verified with unit tests and code review only — **not yet exercised against a real multi-node mesh**. Before relying on it: confirm every node actually connects post-install (`journalctl -u specter-<name>` should show no `rc=5 Not authorised` errors), confirm each service can actually publish/subscribe its own topics (a valid credential with the wrong ACL entry fails *silently* - check `mosquitto.log` for `Denied` lines, Part 6.2), and confirm an unauthenticated `mosquitto_pub` is rejected outright. Traffic is still unencrypted (no TLS) — this blocks casual/opportunistic access and limits blast radius from one leaked credential, it does not defend against a device already trusted enough to hold a valid one.
@@ -720,6 +737,15 @@ journalctl -u specter-thermal -n 100
   - **Original single-lead KardiaMobile** (~$79) — transmits over FM audio, which has been publicly demodulated. Gives a real waveform you can render and hand to MedGemma's multimodal input. Fully air-gapped. You own the accuracy.
 
   For a transplant recipient the high-value ECG use case is **hyperkalemia** (peaked T waves, widening QRS), which needs a waveform. A "normal/AFib" classification byte would not have told you anything useful anyway.
+
+- 🔧 **Omron / Masimo / Braun / Contour BLE parsers — HARD-BLOCKED by default (August 2026).** These weren't just untested — checked against Bluetooth SIG specifications and public reverse-engineering research, they show the same pattern as the removed Kardia parser: plausible-looking code that does not match how these devices actually communicate.
+
+  - **Omron BP7450**: `BluetoothDeviceConfig` points it at service UUID `180a`, the generic Device Information Service (manufacturer/model/serial strings) — not a data service. Its characteristic UUIDs (`2a6e`, `2a6f`, `2a3c`) are the real Bluetooth SIG assignments for **Temperature**, **Humidity**, and **Alert Category ID** — nothing to do with blood pressure or pulse. Independent reverse-engineering ([userx14/omblepy](https://github.com/userx14/omblepy), [evnleong/open-BPM](https://github.com/evnleong/open-BPM)) shows Omron devices actually speak a proprietary EEPROM read/write command protocol, not a single flags+value notification.
+  - **Masimo MightySat**: `parse_masimo_oximeter`'s own docstring claims to read the "Standard BLE Heart Rate Measurement" characteristic (0x2A37) and pulls an SpO2 byte out of it — but [that characteristic has no SpO2 field under the Bluetooth spec](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/HRS_v1.0/out/en/index-en.html). SpO2 lives in a separate standard characteristic, PLX Continuous Measurement (0x2A5F, [Pulse Oximeter Service spec](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/PLXS_v1.0.1/out/en/index-en.html)), with a different structure entirely.
+  - **Braun ThermoScan 7 / Contour Next One**: the real standard Temperature Measurement (0x2A1C) and Glucose Measurement (0x2A18) characteristics both use IEEE-11073 float encodings inside flags-dependent variable-length structures — not the fixed-width raw integers these parsers assume.
+  - `collect_from_device()` also only reads the *first* characteristic listed per device ("Simplified: use first reading") and feeds its raw bytes to a parser expecting several characteristics' combined data — an independent bug on top of the protocol mismatch.
+
+  A plausible-looking wrong vital sign is worse than no reading — nothing about a parsed number by itself reveals it's fabricated. Rather than delete this code outright (unlike Kardia, there's no confirmed-correct replacement path to point to yet, and the UUID/parsing scaffolding is a starting point for whoever does the real capture), `collect_from_device()` now hard-blocks every device type by default: `VERIFIED_DEVICE_TYPES` is empty unless `SPECTER_VERIFIED_BLE_DEVICES` names it. **Verifying one is not a code change** — capture real GATT traffic from the device (a BLE sniffer or `bleak`'s own characteristic dump), confirm or fix the parser against it, then add that `dev_type` to the env var. Until then the hub will scan and discover these devices but publish zero vitals for them, with a startup banner listing what's blocked.
 
 ## 7.5 The binding constraint
 

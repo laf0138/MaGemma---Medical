@@ -117,12 +117,64 @@ class PatientVitals:
 
 
 # ============================================================================
+# VERIFIED DEVICE GATE
+# ============================================================================
+#
+# The service/characteristic UUIDs and byte layouts below were checked
+# against Bluetooth SIG specifications and public reverse-engineering
+# research (August 2026) and do not match how these specific devices are
+# documented to actually communicate:
+#
+#   - omron_bp7450: service_uuid 180a is the generic Device Information
+#     Service (manufacturer/model/serial strings), not a data service.
+#     The characteristic UUIDs given (2a6e, 2a6f, 2a3c) are the real
+#     Bluetooth SIG assignments for Temperature, Humidity, and Alert
+#     Category ID respectively - nothing to do with blood pressure or
+#     pulse. Independent reverse-engineering (userx14/omblepy,
+#     evnleong/open-BPM) shows Omron devices actually use a proprietary
+#     EEPROM read/write command protocol, not a single flags+value
+#     notification at all.
+#   - masimo_mightyssat: parse_masimo_oximeter's own docstring claims to
+#     read the "Standard BLE Heart Rate Measurement" characteristic
+#     (0x2A37) and extracts an SpO2 byte from it - but that characteristic
+#     has no SpO2 field under the Bluetooth spec. SpO2 lives in a
+#     separate standard characteristic (PLX Continuous Measurement,
+#     0x2A5F) with a different structure entirely.
+#   - braun_thermoscan / contour_next_one: the real standard
+#     Temperature Measurement (0x2A1C) and Glucose Measurement (0x2A18)
+#     characteristics both use IEEE-11073 float encodings inside a
+#     flags-dependent variable-length structure, not the fixed-width raw
+#     integers these parsers assume.
+#   - collect_from_device() also only reads the FIRST characteristic
+#     listed per device ("Simplified: use first reading") and feeds its
+#     raw bytes to a parser expecting several characteristics' worth of
+#     combined data - a second, independent bug on top of the protocol
+#     mismatch above.
+#
+# This is the same class of problem as the AliveCor KardiaMobile parser
+# that was removed in v1.1.0 for fabricating a characteristic that never
+# existed (see docs/MANUAL.md Part 7.4) - a plausible-looking wrong vital
+# sign is worse than no reading at all, because nothing about a parsed
+# number by itself reveals that it's wrong.
+#
+# Collection is hard-blocked per device type until someone captures real
+# traffic from the actual hardware and confirms (or replaces) the parser
+# against it - see docs/MANUAL.md Part 7.2. Verifying a device does NOT
+# require a code change: set SPECTER_VERIFIED_BLE_DEVICES to a
+# comma-separated list of the dev_type keys below (e.g.
+# "omron_bp7450,contour_next_one") once confirmed.
+VERIFIED_DEVICE_TYPES = frozenset(
+    d.strip() for d in os.environ.get("SPECTER_VERIFIED_BLE_DEVICES", "").split(",") if d.strip()
+)
+
+
+# ============================================================================
 # BLUETOOTH DEVICE DEFINITIONS
 # ============================================================================
 
 class BluetoothDeviceConfig:
     """Configuration for Bluetooth medical devices"""
-    
+
     # Device UUIDs and characteristic UUIDs (standard medical device specs)
     DEVICES = {
         'omron_bp7450': {
@@ -370,7 +422,17 @@ class MedicalHubBleCollector:
         device_info = self.discovered_devices[device_address]
         device = device_info['object']
         dev_type = device_info['type']
-        
+
+        if dev_type not in VERIFIED_DEVICE_TYPES:
+            logger.error(
+                f"Refusing to read {device_info['name']} ({dev_type}): this device's "
+                f"parser is unverified against real hardware and may produce a "
+                f"plausible-looking WRONG vital sign - see the VERIFIED DEVICE GATE "
+                f"comment above BluetoothDeviceConfig and docs/MANUAL.md Part 7.2. "
+                f"Once confirmed, add '{dev_type}' to SPECTER_VERIFIED_BLE_DEVICES."
+            )
+            return None
+
         try:
             async with BleakClient(device) as client:
                 logger.info(f"Connected to {device_info['name']}")
@@ -536,6 +598,16 @@ def main():
     logger.info(f"MQTT: {args.mqtt_host}:{args.mqtt_port}")
     logger.info(f"Scan timeout: {args.scan_timeout}s")
     logger.info(f"Collection interval: {args.cycle_interval}s")
+    all_device_types = set(BluetoothDeviceConfig.DEVICES)
+    blocked = sorted(all_device_types - VERIFIED_DEVICE_TYPES)
+    if blocked:
+        logger.warning(
+            f"UNVERIFIED DEVICE PARSERS BLOCKED (no vitals will publish for these): "
+            f"{', '.join(blocked)} - see docs/MANUAL.md Part 7.2. Set "
+            f"SPECTER_VERIFIED_BLE_DEVICES once confirmed against real hardware."
+        )
+    if VERIFIED_DEVICE_TYPES:
+        logger.info(f"Verified device types active: {', '.join(sorted(VERIFIED_DEVICE_TYPES))}")
     logger.info("=" * 60)
     
     # Run async main loop

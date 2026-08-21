@@ -14,6 +14,8 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 
 ### 1.1 Raw — Bluetooth, automatic (medical hub, Pi Zero 2W)
 
+> **This table is stale relative to `docs/MANUAL.md` Part 7.4 — treat it as design intent, not current status.** The `ecg_rhythm` row below describes the AliveCor KardiaMobile 6L parser, which was **removed** for fabricating a BLE characteristic that doesn't exist. The other five BLE rows (Omron, Masimo, Braun, Contour) are shipped but **hard-blocked by default** — checked against Bluetooth SIG specs and found to very likely not match how these devices actually communicate, the same class of bug as the removed Kardia parser. None of these fields will actually populate on a fresh install until someone verifies the relevant parser against real hardware. See Part 7.4 for specifics and how to unblock a device once confirmed.
+
 | Field | Unit | Source device | Cadence |
 |---|---|---|---|
 | `bp_systolic` | mmHg | Omron BP7450 | On measurement |
@@ -22,7 +24,7 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 | `spo2` | % | Masimo MightySat | 5–10 s |
 | `temperature_c` | °C | Braun ThermoScan 7 | On measurement |
 | `glucose_mg_dl` | mg/dL | Contour Next One | On measurement |
-| `ecg_rhythm` | normal / afib / inconclusive / unreadable | AliveCor KardiaMobile 6L | On measurement |
+| `ecg_rhythm` | normal / afib / inconclusive / unreadable | ~~AliveCor KardiaMobile 6L~~ REMOVED, see Part 7.4 | On measurement |
 
 Per-reading metadata, all displayable: `device_name`, `timestamp_utc`, `rssi` (dBm), `battery_pct` (BLE characteristic 0x2A19).
 
