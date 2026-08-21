@@ -1,4 +1,5 @@
 paho-mqtt
 bleak
 numpy
+requests
 pytest
