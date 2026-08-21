@@ -1,0 +1,68 @@
+{
+  "version": "1.0.0",
+  "project": "SPECTER Monster Emergency Communications Command Center",
+  "mqtt": {
+    "broker": "192.168.1.1",
+    "port": 1883,
+    "keepalive": 60,
+    "username": "specter-operator",
+    "password": "specter-change-me",
+    "services": {
+      "trauma":      {"username": "specter-trauma",      "password": "specter-change-me"},
+      "medical_ai":  {"username": "specter-medical-ai",  "password": "specter-change-me"},
+      "medical_hub": {"username": "specter-medical-hub", "password": "specter-change-me"},
+      "coordinator": {"username": "specter-coordinator", "password": "specter-change-me"},
+      "sdr_control": {"username": "specter-sdr-control", "password": "specter-change-me"},
+      "thermal":     {"username": "specter-thermal",     "password": "specter-change-me"},
+      "dashboard":   {"username": "specter-dashboard",   "password": "specter-change-me"},
+      "library_api": {"username": "specter-library-api", "password": "specter-change-me"},
+      "rx_buffer":   {"username": "specter-rx-buffer",   "password": "specter-change-me"}
+    }
+  },
+  "network": {
+    "pi1_ip": "192.168.1.1",
+    "pi2_ip": "192.168.1.2",
+    "pi3_ip": "192.168.1.3",
+    "pi4_ip": "192.168.1.4",
+    "subnet": "192.168.1.0/24",
+    "gateway": "192.168.1.1"
+  },
+  "sdr": {
+    "hackrf_enabled": true,
+    "pluto_enabled": true,
+    "kraken_enabled": true,
+    "rtlsdr_enabled": true
+  },
+  "recording": {
+    "output_dir": "/mnt/specter/live/recordings",
+    "archive_dir": "/mnt/specter/archive",
+    "buffer_seconds": 5,
+    "post_seconds": 15,
+    "max_record_seconds": 300,
+    "sample_rate": 48000,
+    "channels": 1
+  },
+  "gps": {
+    "device": "/dev/ttyACM0",
+    "baud": 9600,
+    "gpsd_host": "localhost",
+    "gpsd_port": 2947
+  },
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "update_interval_ms": 250
+  },
+  "thermal": {
+    "idle_max_c": 45,
+    "throttle_c": 75,
+    "emergency_shutdown_c": 85
+  },
+  "power": {
+    "battery_voltage_nominal": 12.8,
+    "battery_chemistry": "LiFePO4",
+    "battery_capacity_ah": 30,
+    "poe_switch": "Netgear GS308EP",
+    "dc_dc_converter": "12V-5V step-down"
+  }
+}

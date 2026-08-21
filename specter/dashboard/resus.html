@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPECTER · RESUS</title>
+<style>
+:root{
+  --ground:#060B0C;--panel:#0B1315;--panel-2:#0E181B;
+  --edge:#1B2A2D;--edge-hot:#25383C;
+  --bone:#C6D8D2;--dim:#5E7B75;--dimmer:#3C5450;
+  --phos:#3FE0A0;--phos-deep:#1E8A5F;
+  --amber:#F0B028;--amber-deep:#6B4A0F;
+  --red:#FF4D4D;--red-deep:#8C1F1F;
+  --inert:#6BA8D6;--inert-deep:#2A5570;--violet:#A87FD6;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--ground);color:var(--bone);
+  font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;
+  font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;min-height:100vh;
+}
+.lbl{font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+.tnum{font-variant-numeric:tabular-nums}
+button{font:inherit;cursor:pointer}
+
+header{display:flex;border-bottom:1px solid var(--edge);background:var(--panel);min-height:60px}
+.scene-id{padding:8px 16px;border-right:1px solid var(--edge);min-width:270px}
+.scene-clock{font-size:24px;font-weight:600}
+.counts{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+.cnt{font-size:10px;padding:1px 6px;border:1px solid}
+.cnt.imm{color:var(--red);border-color:var(--red-deep)}
+.cnt.del{color:var(--amber);border-color:var(--amber-deep)}
+.cnt.min{color:var(--phos);border-color:var(--phos-deep)}
+nav{display:flex;flex:1}
+nav button{background:none;border:none;border-right:1px solid var(--edge);
+  color:var(--dim);font-size:11px;letter-spacing:.13em;padding:0 24px;text-transform:uppercase}
+nav button:hover{color:var(--bone);background:var(--panel-2)}
+nav button.on{color:var(--phos);background:var(--panel-2);box-shadow:inset 0 -2px 0 var(--phos)}
+.brand{padding:8px 16px;border-left:1px solid var(--edge);text-align:right;
+  display:flex;flex-direction:column;justify-content:center;min-width:190px}
+.brand .name{font-size:16px;letter-spacing:.3em}
+.brand .meta{font-size:9px;color:var(--dimmer);letter-spacing:.1em;margin-top:2px}
+
+.mode-banner{background:rgba(240,176,40,.14);border-bottom:1px solid var(--amber-deep);
+  color:var(--amber);font-size:11px;letter-spacing:.08em;padding:6px 16px;
+  display:flex;align-items:center;gap:8px}
+.mode-banner b{letter-spacing:.14em}
+nav button.disabled{opacity:.4;cursor:not-allowed}
+nav button.disabled:hover{color:var(--dim);background:none}
+
+.rail{border-bottom:1px solid var(--edge);padding:8px 16px}
+.rail.quiet{background:rgba(63,224,160,.07);border-bottom-color:var(--phos-deep)}
+.rail.hot{background:rgba(255,77,77,.10);border-bottom-color:var(--red-deep)}
+.rail-row{display:flex;align-items:center;gap:11px;padding:2px 0}
+.rail-row+.rail-row{margin-top:4px;padding-top:5px;border-top:1px solid rgba(255,255,255,.05)}
+.tag{font-size:9px;letter-spacing:.12em;padding:2px 6px;border:1px solid;flex-shrink:0;font-weight:600}
+.tag.crit{color:var(--red);border-color:var(--red);background:rgba(255,77,77,.1)}
+.tag.caut{color:var(--amber);border-color:var(--amber);background:rgba(240,176,40,.08)}
+.tag.ok{color:var(--phos);border-color:var(--phos-deep)}
+.rail-text{flex:1;font-size:12px}
+.rail-btn{background:none;border:1px solid currentColor;color:inherit;
+  font-size:10px;letter-spacing:.1em;padding:4px 11px;flex-shrink:0}
+
+main{flex:1;padding:13px 16px;overflow:auto}
+.screen{display:none}.screen.on{display:block}
+
+/* board */
+.board{display:grid;grid-template-columns:repeat(auto-fill,minmax(305px,1fr));gap:11px}
+.card{background:var(--panel);border:1px solid var(--edge);border-left-width:5px;
+  padding:10px 12px 11px;cursor:pointer}
+.card:hover{background:var(--panel-2);border-color:var(--edge-hot)}
+.card.imm{border-left-color:var(--red)}.card.del{border-left-color:var(--amber)}
+.card.min{border-left-color:var(--phos)}.card.exp{border-left-color:var(--dimmer)}
+.card-top{display:flex;align-items:baseline;justify-content:space-between}
+.cid{font-size:18px;font-weight:600}
+.cat{font-size:10px;letter-spacing:.13em;padding:2px 6px;border:1px solid}
+.cat.imm{color:var(--red);border-color:var(--red-deep)}
+.cat.del{color:var(--amber);border-color:var(--amber-deep)}
+.cat.min{color:var(--phos);border-color:var(--phos-deep)}
+.cat.exp{color:var(--dim);border-color:var(--edge-hot)}
+.card-mech{font-size:10px;letter-spacing:.1em;color:var(--dim);margin-top:4px}
+.card-note{font-size:11px;margin-top:2px;opacity:.85}
+.card-next{margin-top:9px;padding:6px 8px;border:1px solid var(--edge);
+  background:rgba(0,0,0,.3);font-size:11px}
+.card-next.crit{border-color:var(--red-deep);background:rgba(255,77,77,.09);color:var(--red)}
+.card-next.caut{border-color:var(--amber-deep);background:rgba(240,176,40,.06);color:var(--amber)}
+.card-next.ok{color:var(--phos);border-color:var(--phos-deep)}
+.card-next .k{font-size:8px;letter-spacing:.14em;color:var(--dim);display:block;margin-bottom:2px}
+.clocks{margin-top:8px;display:flex;flex-direction:column;gap:3px}
+.clock{display:flex;justify-content:space-between;font-size:11px;padding:3px 7px;
+  border:1px solid var(--edge);background:rgba(0,0,0,.25)}
+.clock .k{font-size:9px;letter-spacing:.1em;color:var(--dim)}
+.clock .v{font-weight:600}
+.clock.normal .v{color:var(--inert)}
+.clock.caution{border-color:var(--amber-deep)}.clock.caution .v{color:var(--amber)}
+.clock.critical{border-color:var(--red-deep);background:rgba(255,77,77,.08)}
+.clock.critical .v{color:var(--red)}
+.clock.removed{opacity:.6}.clock.removed .v{color:var(--dim);text-decoration:line-through}
+.clock.converted .v{color:var(--phos)}
+.vitals{display:flex;gap:11px;flex-wrap:wrap;margin-top:8px;padding-top:7px;border-top:1px solid var(--edge)}
+.vit{display:flex;flex-direction:column}
+.vit .k{font-size:8px;letter-spacing:.12em;color:var(--dim)}
+.vit .v{font-size:15px;font-weight:600;line-height:1.15}
+.vit .v.ok{color:var(--phos)}.vit .v.caut{color:var(--amber)}.vit .v.crit{color:var(--red)}
+.vit .v.none{color:var(--dimmer);font-size:12px}
+.assessed{font-size:10px;color:var(--dim);margin-top:8px;padding-top:7px;
+  border-top:1px solid var(--edge);display:flex;justify-content:space-between}
+.assessed.stale{color:var(--amber)}
+
+/* detail */
+.detail-head{display:flex;align-items:center;gap:13px;flex-wrap:wrap;
+  border:1px solid var(--edge);border-left:5px solid var(--red);
+  background:var(--panel);padding:10px 13px;margin-bottom:11px}
+.back{background:none;border:1px solid var(--edge-hot);color:var(--dim);
+  font-size:11px;padding:5px 12px;letter-spacing:.1em}
+.back:hover{color:var(--bone);border-color:var(--bone)}
+
+/* directive */
+.directive{border:1px solid;padding:11px 14px;margin-bottom:11px;display:flex;
+  align-items:center;gap:14px}
+.directive.crit{border-color:var(--red);background:rgba(255,77,77,.12)}
+.directive.caut{border-color:var(--amber);background:rgba(240,176,40,.09)}
+.directive.ok{border-color:var(--phos-deep);background:rgba(63,224,160,.07)}
+.directive .k{font-size:9px;letter-spacing:.18em;color:var(--dim);white-space:nowrap}
+.directive .m{font-size:17px;font-weight:600;line-height:1.3}
+.directive.crit .m{color:var(--red)}
+.directive.caut .m{color:var(--amber)}
+.directive.ok .m{color:var(--phos)}
+.directive .w{font-size:11px;color:var(--bone);opacity:.8;margin-top:4px;line-height:1.5}
+.directive .jump{margin-left:auto;background:none;border:1px solid currentColor;
+  color:inherit;font-size:10px;letter-spacing:.1em;padding:6px 13px;white-space:nowrap}
+
+/* obligations */
+.oblig{border:1px solid var(--edge);background:var(--panel);margin-bottom:11px}
+.oblig-head{padding:7px 12px;border-bottom:1px solid var(--edge);background:var(--panel-2);
+  font-size:10px;letter-spacing:.14em;color:var(--dim);display:flex;justify-content:space-between}
+.ob{display:flex;align-items:center;gap:11px;padding:8px 12px;
+  border-top:1px solid rgba(255,255,255,.035)}
+.ob:first-of-type{border-top:none}
+.ob-t{flex:1;min-width:0}
+.ob-l{font-size:12px}
+.ob-d{font-size:10px;color:var(--dim);margin-top:2px}
+.ob-c{font-size:14px;font-weight:600;white-space:nowrap}
+.ob.due .ob-c{color:var(--amber)}
+.ob.over{background:rgba(255,77,77,.07)}
+.ob.over .ob-c{color:var(--red)}
+.ob.ok .ob-c{color:var(--dim)}
+.ob-b{background:none;border:1px solid var(--edge-hot);color:var(--dim);
+  font-size:10px;padding:5px 11px;letter-spacing:.08em}
+.ob-b:hover{color:var(--phos);border-color:var(--phos-deep)}
+
+/* phases */
+.phase{border:1px solid var(--edge);background:var(--panel);margin-bottom:8px}
+.phase.focus{border-color:var(--red-deep);box-shadow:0 0 0 1px rgba(255,77,77,.25)}
+.phase-head{display:flex;align-items:center;gap:13px;padding:8px 12px;
+  background:var(--panel-2);border-bottom:1px solid var(--edge)}
+.letter{font-size:21px;font-weight:600;width:28px;text-align:center;color:var(--phos)}
+.phase.focus .letter{color:var(--red)}
+.phase-title{font-size:13px;letter-spacing:.16em;font-weight:600}
+.phase-prem{font-size:10px;color:var(--dim);margin-top:2px;max-width:76ch;line-height:1.5}
+.phase-prog{margin-left:auto;font-size:10px;color:var(--dim);letter-spacing:.1em}
+.phase-prog b{color:var(--phos)}
+
+.step{display:flex;gap:10px;padding:8px 12px;border-top:1px solid rgba(255,255,255,.035)}
+.step:first-child{border-top:none}
+.step.act{cursor:pointer}
+.step.act:hover{background:rgba(255,255,255,.02)}
+.box{width:18px;height:18px;border:1px solid var(--dimmer);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:11px;
+  color:var(--ground);margin-top:1px}
+.step.done .box{background:var(--phos);border-color:var(--phos)}
+.step.done .box::after{content:"✓";font-weight:700}
+.step.locked{opacity:.4}
+.step.locked .box{border-style:dotted}
+.step.now{background:rgba(255,77,77,.08);box-shadow:inset 3px 0 0 var(--red)}
+.step-body{flex:1;min-width:0}
+.step-label{font-size:12px}
+.step.done .step-label{color:var(--phos)}
+.step-detail{font-size:10.5px;color:var(--dim);margin-top:3px;line-height:1.55;max-width:82ch}
+.step-warn{font-size:10px;color:var(--amber);margin-top:4px;padding-left:8px;
+  border-left:2px solid var(--amber-deep)}
+.step-lock{font-size:10px;color:var(--inert);margin-top:3px}
+.gate,.rtag,.ntag{font-size:8px;letter-spacing:.11em;padding:1px 5px;margin-left:6px;
+  white-space:nowrap;border:1px solid}
+.gate{color:var(--amber);border-color:var(--amber-deep)}
+.rtag{color:var(--inert);border-color:var(--inert-deep)}
+.ntag{color:var(--red);border-color:var(--red);background:rgba(255,77,77,.12)}
+.stamp{font-size:9.5px;color:var(--phos);opacity:.7;margin-top:3px}
+
+/* collapsed done */
+.step.collapsed{padding:5px 12px;opacity:.55}
+.step.collapsed .step-detail,.step.collapsed .step-warn{display:none}
+.step.collapsed .step-label{font-size:11px}
+.step.collapsed .box{width:14px;height:14px;font-size:9px}
+
+/* findings */
+.finds{display:flex;gap:7px;margin-top:7px;flex-wrap:wrap}
+.find{background:var(--panel-2);border:1px solid var(--edge-hot);color:var(--dim);
+  font-size:10.5px;padding:5px 11px;letter-spacing:.05em}
+.find:hover{color:var(--bone);border-color:var(--bone)}
+.find.sel{border-color:var(--phos);color:var(--phos);background:rgba(63,224,160,.09)}
+.find.sel.bad{border-color:var(--red);color:var(--red);background:rgba(255,77,77,.1)}
+
+.two{display:grid;grid-template-columns:1fr 300px;gap:11px;align-items:start}
+.side{border:1px solid var(--edge);background:var(--panel)}
+.side-head{padding:7px 11px;border-bottom:1px solid var(--edge);background:var(--panel-2);
+  font-size:10px;letter-spacing:.14em;color:var(--dim)}
+.side-body{padding:9px 11px}
+.logline{display:flex;gap:8px;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.035)}
+.logline:last-child{border-bottom:none}
+.logline .t{color:var(--dim);flex-shrink:0}
+.mech-note{font-size:10.5px;color:var(--dim);line-height:1.6;padding:3px 0}
+.mech-note::before{content:"› ";color:var(--phos)}
+.state-row{display:flex;justify-content:space-between;font-size:11px;padding:4px 0;
+  border-bottom:1px solid rgba(255,255,255,.035)}
+.state-row:last-child{border-bottom:none}
+.state-row .k{color:var(--dim);font-size:10px}
+.state-row .v.good{color:var(--phos)}
+.state-row .v.bad{color:var(--red)}
+.state-row .v.unk{color:var(--dimmer)}
+
+.actions{display:flex;gap:10px;padding:11px 16px;border-top:1px solid var(--edge);background:var(--panel)}
+.act{flex:1;background:var(--panel-2);border:1px solid var(--edge-hot);color:var(--bone);
+  padding:12px 15px;text-align:left;min-height:58px}
+.act:hover{border-color:var(--phos-deep);background:#111C1F}
+.act .t{font-size:13px;letter-spacing:.08em}
+.act .s{font-size:10px;color:var(--dim);margin-top:3px}
+.act.p .t{color:var(--phos)}.act.v .t{color:var(--violet)}.act.a .t{color:var(--amber)}
+footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:var(--dimmer);
+  display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+@media (max-width:900px){.two{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.card:focus-visible,.step.act:focus-visible{outline:2px solid var(--phos);outline-offset:2px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="scene-id">
+    <div class="lbl">Scene elapsed</div>
+    <div style="display:flex;align-items:baseline;gap:9px">
+      <span class="scene-clock tnum" id="sceneClock">00:00:00</span>
+      <span class="lbl" id="casCount"></span>
+    </div>
+    <div class="counts" id="counts"></div>
+  </div>
+  <nav>
+    <button class="on" data-screen="board">Triage</button>
+    <button data-screen="detail">MARCH</button>
+    <button class="disabled" disabled title="Not installed - see docs/MANUAL.md Part 7.3">Ward — NOT INSTALLED</button>
+    <button class="disabled" disabled title="Not installed - see docs/MANUAL.md Part 7.3">Chronic — NOT INSTALLED</button>
+  </nav>
+  <div class="brand">
+    <div class="name">SPECTER</div><div class="meta">RESUS · HUB-7F3A</div>
+  </div>
+</header>
+
+<div class="mode-banner" role="status">
+  <b>⚠ DEMO MODE</b>
+  <span>This screen is running on locally-generated sample casualties, not live data. It does not consume the trauma service's MQTT state (shtf/trauma/#) yet — see docs/MANUAL.md Part 7.4. Nothing entered here reaches the trauma service or any other operator's screen.</span>
+</div>
+
+<div class="rail" id="rail"></div>
+
+<main>
+  <section class="screen on" id="screen-board"><div class="board" id="board"></div></section>
+  <section class="screen" id="screen-detail">
+    <div class="detail-head" id="detailHead"></div>
+    <div id="directive"></div>
+    <div class="two">
+      <div>
+        <div id="obligs"></div>
+        <div id="marchWrap"></div>
+      </div>
+      <div>
+        <div class="side" style="margin-bottom:11px">
+          <div class="side-head">Assessed state</div>
+          <div class="side-body" id="stateBox"></div>
+        </div>
+        <div class="side" style="margin-bottom:11px">
+          <div class="side-head">Mechanism — what to look for</div>
+          <div class="side-body" id="mechBox"></div>
+        </div>
+        <div class="side">
+          <div class="side-head">Intervention log</div>
+          <div class="side-body" id="logBox"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="actions">
+  <button class="act p" onclick="addCasualty()">
+    <div class="t">+ ADD CASUALTY</div><div class="s">One tap. Classify after.</div></button>
+  <button class="act a" id="btnMarkAssessed" onclick="markAssessed()">
+    <div class="t" id="btnMarkAssessedTitle">MARK REASSESSED</div><div class="s">Clears the staleness clock</div></button>
+  <button class="act v" disabled style="opacity:.45;cursor:not-allowed">
+    <div class="t">ASK MEDGEMMA — NOT INSTALLED</div><div class="s">Not wired to this screen yet - medical_ai.py runs as a separate MQTT service (see docs/MANUAL.md Part 7.4)</div></button>
+</div>
+
+<footer>
+  <span>Decision support for a trained responder. Protocol content is a memory aid, not instruction. Several steps cause harm without training.</span>
+  <span>MQTT · shtf/trauma/#</span>
+</footer>
+
+<script>
+"use strict";
+
+/* ============ protocol as a state machine ============
+   type: 'act'    — an intervention you perform
+         'assess' — produces a finding that gates other steps
+   lock(c) → string reason, or null if available
+   urgent(c) → true when this is the thing to do right now
+*/
+const MARCH=[
+{k:"m",letter:"M",title:"MASSIVE HEMORRHAGE",
+ premise:"Exsanguination is the fastest preventable death in penetrating trauma. Control bleeding before anything else, including airway.",
+ steps:[
+  {id:"m1",type:"assess",label:"Identify the bleeding",
+   detail:"Expose the area. Blood tracks and pools away from its source — find the hole, do not treat the puddle.",
+   field:"bleed",opts:[["none","No major bleeding","good"],["extremity","Extremity","bad"],["junctional","Junctional","bad"],["ctrl","Controlled","good"]]},
+  {id:"m2",type:"act",label:"Tourniquet — extremity bleeding",
+   detail:"High and tight over clothing. Tighten until bleeding stops AND the distal pulse is gone. A tourniquet that lets bleeding continue is worse than none — it obstructs venous return while arterial flow persists.",
+   warn:"Log the time. Write it on the windlass as well.",
+   lock:c=>c.f.bleed==null?"Assess bleeding first (M1)":c.f.bleed==="junctional"?"Junctional bleeding — a tourniquet cannot reach this. Pack it (M3).":null,
+   urgent:c=>c.f.bleed==="extremity"&&!c.d.m2},
+  {id:"m3",type:"act",label:"Wound packing — junctional bleeding",
+   detail:"Groin, axilla, neck. Pack hemostatic gauze directly onto the bleeding vessel, deep into the wound, then hold firm pressure for 3 full minutes by the clock. Do not peek early.",
+   lock:c=>c.f.bleed==null?"Assess bleeding first (M1)":null,
+   urgent:c=>c.f.bleed==="junctional"&&!c.d.m3},
+  {id:"m4",type:"act",label:"Pressure dressing",
+   detail:"Over packed wounds and for bleeding not requiring a tourniquet.",
+   lock:c=>c.f.bleed==null?"Assess bleeding first (M1)":null},
+  {id:"m5",type:"act",label:"Pelvic binder",
+   detail:"Suspected pelvic fracture in blunt trauma. Position at the greater trochanters, not the iliac crests.",
+   lock:c=>["fall","mvc","crush","blast"].includes(c.mech)?null:"Blunt mechanism only — not indicated here"},
+  {id:"m6",type:"assess",label:"Confirm bleeding controlled",
+   detail:"Dressings soak through and tourniquets loosen as limbs change shape. Look again.",
+   field:"bleedCtrl",opts:[["yes","Controlled","good"],["no","Still bleeding","bad"]],
+   lock:c=>(c.d.m2||c.d.m3||c.d.m4)?null:"Nothing applied yet",
+   urgent:c=>c.f.bleedCtrl==="no"}
+ ]},
+{k:"a",letter:"A",title:"AIRWAY",
+ premise:"An unconscious patient's airway closes from the tongue and from swelling. Positioning solves most of it.",
+ steps:[
+  {id:"a1",type:"assess",label:"Assess — can they speak?",
+   detail:"A patient talking in full sentences has a patent airway. Snoring, gurgling, or stridor means it is compromised now.",
+   field:"airway",opts:[["patent","Speaking clearly","good"],["noisy","Snoring / gurgling","bad"],["absent","No air movement","bad"]]},
+  {id:"a2",type:"act",label:"Open the airway",
+   detail:"Chin lift or jaw thrust. Use jaw thrust where spinal injury is possible.",
+   lock:c=>c.f.airway==null?"Assess airway first (A1)":c.f.airway==="patent"?"Airway patent — not needed":null,
+   urgent:c=>["noisy","absent"].includes(c.f.airway)&&!c.d.a2},
+  {id:"a3",type:"act",label:"Nasopharyngeal airway",
+   detail:"Tolerated by semi-conscious patients where an oral airway is not. Lubricate, insert along the floor of the nostril.",
+   warn:"Avoid with suspected mid-face or base-of-skull fracture.",
+   lock:c=>c.f.airway==="patent"?"Airway patent — not needed":c.f.airway==null?"Assess airway first (A1)":null},
+  {id:"a4",type:"act",label:"Recovery position",
+   detail:"Unconscious, breathing, no spinal concern — this alone protects the airway better than most equipment.",
+   lock:c=>["fall","mvc","crush"].includes(c.mech)?"Spinal injury possible with this mechanism — maintain alignment":null},
+  {id:"a5",type:"act",label:"Supraglottic airway",gate:true,
+   detail:"Deeply unconscious with no gag reflex.",
+   warn:"Causes aspiration if placed in a patient with a gag reflex.",
+   lock:c=>c.f.airway!=="absent"?"Reserve for absent air movement after simpler measures":!c.d.a2?"Try positioning first (A2)":null},
+  {id:"a6",type:"assess",label:"Recheck airway",
+   detail:"Swelling progresses. Burns and neck trauma especially — the airway that was fine ten minutes ago may not be.",
+   field:"airway",opts:[["patent","Patent","good"],["noisy","Noisy","bad"],["absent","Absent","bad"]],
+   lock:c=>c.f.airway==null?"Assess airway first (A1)":null}
+ ]},
+{k:"r",letter:"R",title:"RESPIRATION",
+ premise:"Tension pneumothorax is the most survivable preventable death in penetrating chest trauma. It develops over minutes, and it can develop under a chest seal you already placed.",
+ steps:[
+  {id:"r1",type:"assess",label:"Expose and examine the chest",
+   detail:"Front and back, neck to waist. Feel as well as look. Count the holes.",
+   field:"chest",opts:[["clear","No wounds","good"],["open","Open wound(s)","bad"],["closed","Closed injury","bad"]]},
+  {id:"r2",type:"act",label:"Vented chest seal — every open wound",
+   detail:"Vented allows trapped air out and prevents tension developing underneath. Seal entry and exit both.",
+   lock:c=>c.f.chest==null?"Examine the chest first (R1)":c.f.chest!=="open"?"No open chest wound found":null,
+   urgent:c=>c.f.chest==="open"&&!c.d.r2},
+  {id:"r3",type:"assess",label:"Assess for tension pneumothorax",
+   detail:"Increasing respiratory distress, decreasing breath sounds on one side, rising heart rate, falling blood pressure. Tracheal deviation and distended neck veins are late and unreliable — do not wait for them.",
+   field:"tension",opts:[["no","Excluded","good"],["suspect","Suspected","bad"]],
+   lock:c=>c.f.chest==null?"Examine the chest first (R1)":null,
+   urgent:c=>c.v&&(c.v.rr>30||c.v.spo2<92)&&c.f.tension==null},
+  {id:"r5",type:"act",label:"Burp the seal",
+   detail:"Lift one corner of the seal to release trapped air. Simpler and safer than a needle where the seal is the likely cause of rising pressure.",
+   lock:c=>!c.d.r2?"No seal placed":null,
+   urgent:c=>c.f.tension==="suspect"&&c.d.r2&&!c.d.r5},
+  {id:"r4",type:"act",label:"Needle decompression",gate:true,
+   detail:"14g × 3.25in catheter, 5th intercostal space anterior axillary line, over the top of the rib. Standard IV catheters are too short to reach the pleural space in most adults.",
+   warn:"Causes harm when the diagnosis is wrong. Training required.",
+   lock:c=>c.f.tension!=="suspect"?"Only with suspected tension (R3)":(c.d.r2&&!c.d.r5)?"Burp the seal first (R5) — the seal is the likelier cause":null,
+   urgent:c=>c.f.tension==="suspect"&&(!c.d.r2||c.d.r5)&&!c.d.r4}
+ ]},
+{k:"c",letter:"C",title:"CIRCULATION",
+ premise:"Blood pressure is the last thing to fall. Heart rate rising and pulse pressure narrowing tell you first — watch the shock index.",
+ steps:[
+  {id:"c1",type:"assess",label:"Assess perfusion",
+   detail:"Radial pulse present suggests a systolic roughly above 90. Capillary refill, skin colour, mental status. Mental status change in a bleeding patient is shock until proven otherwise.",
+   field:"perf",opts:[["good","Radial strong","good"],["weak","Radial weak","bad"],["absent","No radial","bad"]]},
+  {id:"c2",type:"act",label:"Intraosseous access",gate:true,
+   detail:"Proximal tibia. Far more achievable than a peripheral IV in a shocked patient with collapsed veins.",
+   lock:c=>c.f.perf==null?"Assess perfusion first (C1)":null,
+   urgent:c=>["weak","absent"].includes(c.f.perf)&&!c.d.c2&&!c.d.c3},
+  {id:"c3",type:"act",label:"IV access",
+   detail:"Where veins are accessible and time permits.",
+   lock:c=>c.f.perf==="absent"?"Veins likely collapsed — go intraosseous (C2)":null},
+  {id:"c4",type:"act",label:"Tranexamic acid",gate:true,
+   detail:"Give as early as possible in significant hemorrhage. Benefit falls with delay and is absent or harmful beyond 3 hours.",
+   warn:"Prescription medication. Dosing per your physician's direction.",
+   lock:c=>(!c.d.c2&&!c.d.c3)?"Needs vascular access (C2 or C3)":age(c)>10800?"Beyond 3 hours from injury — no longer indicated":null,
+   urgent:c=>(c.d.c2||c.d.c3)&&!c.d.c4&&(c.f.bleed==="extremity"||c.f.bleed==="junctional")},
+  {id:"c5",type:"act",label:"Fluid — cautiously",
+   detail:"Titrate to a palpable radial pulse and improved mental status, not to a normal blood pressure. Over-resuscitation dislodges clot and worsens bleeding.",
+   lock:c=>(!c.d.c2&&!c.d.c3)?"Needs vascular access (C2 or C3)":c.f.bleedCtrl==="no"?"Bleeding not yet controlled — fluid will dislodge clot. Finish M first.":null}
+ ]},
+{k:"h",letter:"H",title:"HYPOTHERMIA / HEAD",
+ premise:"A cold trauma patient stops clotting regardless of how well the wound was packed. Hypothermia, acidosis and coagulopathy reinforce each other. This is the cheapest intervention in the kit and the one most often skipped.",
+ steps:[
+  {id:"h1",type:"act",label:"Insulate from the ground",
+   detail:"Conduction into cold ground is the main heat loss path. A foam pad underneath matters more than a blanket on top."},
+  {id:"h2",type:"act",label:"Remove wet clothing",
+   detail:"Cut it off rather than manipulating the patient. Wet clothing removes heat many times faster than dry air."},
+  {id:"h3",type:"act",label:"Active warming and wrap",
+   detail:"Chemical warming blanket inside an insulating shell. Cover the head — significant loss occurs there.",
+   urgent:c=>!c.d.h3&&age(c)>900},
+  {id:"h4",type:"assess",label:"Head injury — level of consciousness",
+   detail:"Record a baseline so change is detectable. Deterioration is the finding that matters, not the absolute number.",
+   field:"avpu",opts:[["A","Alert","good"],["V","Voice","bad"],["P","Pain","bad"],["U","Unresponsive","bad"]]},
+  {id:"h5",type:"act",label:"Elevate head 30°",
+   detail:"Only once spine is protected and shock is addressed.",
+   lock:c=>c.f.avpu==null?"Assess consciousness first (H4)":c.f.avpu==="A"?"Alert — not indicated":["weak","absent"].includes(c.f.perf)?"Shock unaddressed — head-up worsens cerebral perfusion":null}
+ ]}
+];
+
+/* ============ recurring obligations spawned by actions ============ */
+const OBLIGATIONS=[
+ {id:"tq",label:"Reassess distal to tourniquet",
+  detail:"Confirm bleeding still controlled and the limb below is not re-perfusing",
+  every:900,when:c=>c.tqs.length>0},
+ {id:"seal",label:"Recheck chest after seal",
+  detail:"Tension can develop under a seal you placed",
+  every:600,when:c=>!!c.d.r2},
+ {id:"airway",label:"Recheck airway",
+  detail:"Swelling progresses — burns and neck trauma especially",
+  every:900,when:c=>["noisy","absent"].includes(c.f.airway)||!!c.d.a3||!!c.d.a5},
+ {id:"vitals",label:"Repeat vitals",
+  detail:"Trend beats snapshot — shock index rises before pressure falls",
+  every:600,when:c=>true},
+ {id:"decomp",label:"Recheck after decompression",
+  detail:"Tension can recur; catheters kink and block",
+  every:300,when:c=>!!c.d.r4}
+];
+
+const MECH={
+ gsw:["Look for exit wounds — count holes, they come in even numbers more often than not",
+      "Expose fully; a second wound is easy to miss under clothing",
+      "Chest or abdomen involvement means rapid deterioration is possible"],
+ blast:["Primary blast injury: lungs and hollow organs, may present late",
+        "Check tympanic membranes — rupture suggests significant overpressure",
+        "Assume multiple injury mechanisms simultaneously"],
+ fall:["Assume spinal injury until cleared",
+       "Calcaneal, pelvic and spinal fractures cluster in axial-load falls"],
+ crush:["CRUSH SYNDROME RISK — rhabdomyolysis and hyperkalemia after release",
+        "Deterioration classically follows extrication, not precedes it",
+        "Strongest ECG indication in the kit — peaked T waves, widening QRS"],
+ mvc:["Assume spinal injury until cleared","Look for seatbelt sign"],
+ unknown:["Expose and examine systematically front and back"]
+};
+
+const CATS={IMMEDIATE:"imm",DELAYED:"del",MINIMAL:"min",EXPECTANT:"exp",DECEASED:"exp"};
+const RANK={IMMEDIATE:0,DELAYED:1,MINIMAL:2,EXPECTANT:3,DECEASED:4};
+const STALE={IMMEDIATE:300,DELAYED:900,MINIMAL:1800,EXPECTANT:900,DECEASED:1e9};
+
+const T0=Date.now();
+let seq=0,selected="C-1",screen_="board";
+const now=()=>Math.floor((Date.now()-T0)/1000);
+function hms(s){s=Math.max(0,Math.floor(s));
+ return String(s/3600|0).padStart(2,"0")+":"+String(s%3600/60|0).padStart(2,"0")+":"+String(s%60).padStart(2,"0");}
+function ms(s){s=Math.max(0,Math.floor(s));const n=s<0;s=Math.abs(s);
+ return (n?"-":"")+String(s/60|0).padStart(2,"0")+":"+String(s%60).padStart(2,"0");}
+
+function mk(o){seq++;return Object.assign({
+ id:"C-"+seq,cat:"DELAYED",mech:"unknown",note:"",found:0,seen:0,
+ tqs:[],v:null,d:{},st:{},f:{},ob:{},log:[]},o);}
+
+const age=c=>now()-c.found;
+const since=c=>now()-c.seen;
+const stale=c=>since(c)>(STALE[c.cat]||900);
+const tqEl=t=>t.conv!=null?t.conv-t.applied:t.removed!=null?t.removed-t.applied:now()-t.applied;
+const tqLv=t=>t.conv!=null?"converted":t.removed!=null?"removed":(tqEl(t)/3600>=4?"critical":tqEl(t)/3600>=2?"caution":"normal");
+const tqTag=t=>t.conv!=null?" · CONVERTED":t.removed!=null?" · REMOVED (correction)":"";
+const si=c=>c.v&&c.v.sbp?+(c.v.hr/c.v.sbp).toFixed(2):null;
+
+const cas=[
+ mk({cat:"IMMEDIATE",mech:"gsw",note:"L thigh, arterial",found:-1330,seen:-95,
+     tqs:[{limb:"L thigh",applied:-1320,conv:null}],
+     v:{sbp:86,dbp:58,hr:128,rr:34,spo2:91},
+     d:{m1:1,m2:1,m4:1,a1:1,c1:1},
+     st:{m1:-1325,m2:-1320,m4:-1290,a1:-1270,c1:-1180},
+     f:{bleed:"extremity",airway:"patent",perf:"weak"},
+     ob:{tq:-1320,vitals:-300},
+     log:[[-1330,"Found — L thigh, heavy arterial"],[-1325,"Bleeding identified: extremity"],
+          [-1320,"Tourniquet L thigh"],[-1290,"Pressure dressing"],
+          [-1270,"Airway patent"],[-1180,"Perfusion: radial weak"],[-95,"Reassessed"]]}),
+ mk({cat:"IMMEDIATE",mech:"blast",note:"Chest, bilateral frag",found:-940,seen:-240,
+     v:{sbp:104,dbp:66,hr:118,rr:32,spo2:88},
+     d:{m1:1,a1:1,r1:1,r2:1,h3:1},
+     st:{m1:-930,a1:-920,r1:-900,r2:-880,h3:-620},
+     f:{bleed:"none",airway:"patent",chest:"open"},
+     ob:{seal:-880,vitals:-240},
+     log:[[-940,"Found — blast, chest"],[-900,"Chest examined: open wounds"],
+          [-880,"Chest seal ×2 entry/exit"],[-620,"Hypothermia wrap"],[-240,"Reassessed"]]}),
+ mk({cat:"DELAYED",mech:"fall",note:"R forearm deformity",found:-610,seen:-300,
+     v:{sbp:128,dbp:80,hr:92,rr:18,spo2:98},
+     d:{m1:1,a1:1,c1:1},st:{m1:-600,a1:-590,c1:-560},
+     f:{bleed:"none",airway:"patent",perf:"good"},
+     ob:{vitals:-300},
+     log:[[-610,"Found — fall from ladder"],[-560,"Splinted R forearm"],[-300,"Reassessed"]]}),
+ mk({cat:"MINIMAL",mech:"fall",note:"Abrasions, ambulatory",found:-480,seen:-420,
+     v:{sbp:122,dbp:76,hr:78,rr:16,spo2:99},
+     d:{m1:1},st:{m1:-470},f:{bleed:"none"},ob:{vitals:-470},
+     log:[[-480,"Found — walking wounded"]]})
+];
+
+const step_=id=>MARCH.flatMap(p=>p.steps).find(s=>s.id===id);
+const lockOf=(c,s)=>s.lock?s.lock(c):null;
+const isUrgent=(c,s)=>!c.d[s.id]&&!lockOf(c,s)&&s.urgent&&s.urgent(c);
+
+function obligs(c){
+ return OBLIGATIONS.filter(o=>o.when(c)).map(o=>{
+  const last=c.ob[o.id]!=null?c.ob[o.id]:c.found;
+  const due=last+o.every, rem=due-now();
+  return {...o,rem,state:rem<-120?"over":rem<=0?"due":"ok"};
+ }).sort((a,b)=>a.rem-b.rem);
+}
+
+/* the derived directive — first matching rule wins */
+function directive(c){
+ const ob=obligs(c), over=ob.filter(o=>o.state==="over"), due=ob.filter(o=>o.state==="due");
+
+ if(c.f.bleedCtrl==="no")
+  return{lv:"crit",m:"BLEEDING NOT CONTROLLED",w:"Go back to M. Tighten the tourniquet, or pack deeper and hold three full minutes.",j:"m"};
+ if(c.f.bleed&&c.f.bleed!=="none"&&c.f.bleed!=="ctrl"&&!c.d.m2&&!c.d.m3)
+  return{lv:"crit",m:c.f.bleed==="junctional"?"PACK THE WOUND":"APPLY TOURNIQUET",
+   w:c.f.bleed==="junctional"?"Junctional — a tourniquet cannot reach it. Hemostatic gauze onto the vessel, three minutes of pressure.":"High and tight. Tighten until the distal pulse is gone.",j:"m"};
+ if(["noisy","absent"].includes(c.f.airway)&&!c.d.a2)
+  return{lv:"crit",m:"OPEN THE AIRWAY",w:"Jaw thrust if spinal injury is possible. Positioning first, adjuncts after.",j:"a"};
+ if(c.f.tension==="suspect"&&c.d.r2&&!c.d.r5)
+  return{lv:"crit",m:"BURP THE SEAL FIRST",w:"A seal you placed is the likelier cause of rising pressure than a new tension. Lift a corner before reaching for a needle.",j:"r"};
+ if(c.f.tension==="suspect"&&(!c.d.r2||c.d.r5)&&!c.d.r4)
+  return{lv:"crit",m:"DECOMPRESS",w:"14g × 3.25in, 5th ICS anterior axillary line, over the top of the rib.",j:"r"};
+ if(c.f.chest==="open"&&!c.d.r2)
+  return{lv:"crit",m:"SEAL THE CHEST",w:"Vented seal, entry and exit both.",j:"r"};
+ if(c.v&&(c.v.rr>30||c.v.spo2<92)&&c.f.tension==null&&c.d.r2)
+  return{lv:"crit",m:"ASSESS FOR TENSION",w:`RR ${c.v.rr}, SpO₂ ${c.v.spo2}% with a seal in place. Tension develops under seals. Check now.`,j:"r"};
+ if(c.f.chest==null&&["gsw","blast","stab","mvc"].includes(c.mech))
+  return{lv:"crit",m:"EXPOSE THE CHEST",w:"Front and back, neck to waist. Count the holes.",j:"r"};
+ if(over.length)
+  return{lv:"crit",m:over[0].label.toUpperCase(),w:`${over[0].detail}. Overdue by ${ms(-over[0].rem)}.`,j:null,ob:over[0].id};
+ const s=si(c);
+ if(s!==null&&s>1.0&&!c.d.c2&&!c.d.c3)
+  return{lv:"crit",m:"GET VASCULAR ACCESS",w:`Shock index ${s} — decompensating. Intraosseous is faster than a vein that has collapsed.`,j:"c"};
+ if(c.f.airway==null)
+  return{lv:"caut",m:"ASSESS THE AIRWAY",w:"Can they speak in full sentences?",j:"a"};
+ if(c.f.perf==null)
+  return{lv:"caut",m:"ASSESS PERFUSION",w:"Radial pulse, capillary refill, mental status.",j:"c"};
+ if(!c.d.h3&&age(c)>900&&c.cat!=="MINIMAL")
+  return{lv:"caut",m:"WRAP FOR HYPOTHERMIA",w:`${hms(age(c))} on scene without warming. A cold patient stops clotting no matter how well the wound was packed.`,j:"h"};
+ if((c.d.c2||c.d.c3)&&!c.d.c4&&["extremity","junctional"].includes(c.f.bleed)&&age(c)<10800)
+  return{lv:"caut",m:"CONSIDER TXA",w:`Access is in and significant hemorrhage is present. ${hms(10800-age(c))} left in the window.`,j:"c"};
+ if(due.length)
+  return{lv:"caut",m:due[0].label.toUpperCase(),w:due[0].detail+".",j:null,ob:due[0].id};
+ if(!c.v)
+  return{lv:"caut",m:"RECORD VITALS",w:"Nothing measured yet. Shock index needs a rate and a pressure.",j:null};
+ const nxt=ob[0];
+ return{lv:"ok",m:"NOTHING OUTSTANDING",
+  w:nxt?`Next due: ${nxt.label.toLowerCase()} in ${ms(nxt.rem)}.`:"Keep eyes on. Reassess on schedule.",j:null};
+}
+
+function alertsFor(c){
+ const out=[];
+ c.tqs.forEach(t=>{const lv=tqLv(t);
+  if(lv==="critical")out.push({lv:"crit",txt:`Tourniquet ${t.limb} at ${hms(tqEl(t))} — limb viability concern`,id:c.id});
+  else if(lv==="caution")out.push({lv:"caut",txt:`Tourniquet ${t.limb} at ${hms(tqEl(t))}`,id:c.id});});
+ const s=si(c);
+ if(s!==null&&s>1.0)out.push({lv:"crit",txt:`Shock index ${s} — decompensating`,id:c.id});
+ else if(s!==null&&s>0.9)out.push({lv:"caut",txt:`Shock index ${s}`,id:c.id});
+ obligs(c).filter(o=>o.state==="over").forEach(o=>
+  out.push({lv:"crit",txt:`${o.label} overdue by ${ms(-o.rem)}`,id:c.id}));
+ if(stale(c)&&c.cat!=="DECEASED")
+  out.push({lv:"caut",txt:`Not reassessed in ${hms(since(c))}`,id:c.id});
+ return out;
+}
+
+const sorted=()=>[...cas].sort((a,b)=>(RANK[a.cat]-RANK[b.cat])||(stale(b)-stale(a))||(since(b)-since(a)));
+const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
+
+/* Every screen fully rebuilds its innerHTML once a second (draw() below) so
+   the reassessment/tourniquet clocks stay live without per-element timers.
+   That destroys focus on every tick, which is fine for plain text but
+   breaks keyboard operation of the now-focusable cards/steps below (see
+   makeFocusable). This re-finds and restores focus by the same data-fid
+   the element had before the rebuild, inside the one container that was
+   rebuilt, instead of re-rendering everything less often. */
+function preserveFocus(containerId,renderFn){
+ const container=document.getElementById(containerId);
+ const active=document.activeElement;
+ const fid=(active&&container&&container.contains(active))?active.dataset.fid:null;
+ renderFn();
+ if(fid){
+  const el=container.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
+  if(el)el.focus({preventScroll:true});
+ }
+}
+
+/* Cards and checklist steps were plain clickable <div>s - invisible and
+   inert to keyboard/assistive-tech users, who had no way to reach or
+   activate them at all. This produces the attribute string shared by
+   every generated clickable div: focusable, announced as a button, and
+   operable with Enter/Space in addition to click. */
+function makeFocusable(fid,onActivate){
+ return `tabindex="0" role="button" data-fid="${esc(fid)}" `+
+  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${onActivate}}"`;
+}
+
+/* ============ render ============ */
+function renderHeader(){
+ document.getElementById("sceneClock").textContent=hms(now()+1400);
+ document.getElementById("casCount").textContent=cas.length+" casualties";
+ const n={};cas.forEach(c=>n[c.cat]=(n[c.cat]||0)+1);
+ document.getElementById("counts").innerHTML=Object.keys(RANK).filter(k=>n[k])
+  .map(k=>`<span class="cnt ${CATS[k]}">${k.slice(0,3)} ${n[k]}</span>`).join("");
+}
+function renderRail(){
+ const all=[];cas.forEach(c=>alertsFor(c).forEach(a=>all.push(a)));
+ all.sort((a,b)=>(a.lv==="crit"?0:1)-(b.lv==="crit"?0:1));
+ const r=document.getElementById("rail");
+ if(!all.length){r.className="rail quiet";
+  r.innerHTML=`<div class="rail-row"><span class="tag ok">CLEAR</span>
+   <span class="rail-text">All casualties assessed and within thresholds</span></div>`;return;}
+ r.className="rail hot";
+ r.innerHTML=all.slice(0,3).map(a=>`<div class="rail-row">
+   <span class="tag ${a.lv==="crit"?"crit":"caut"}">${a.lv==="crit"?"CRITICAL":"CAUTION"}</span>
+   <span class="rail-text"><b>${a.id}</b> — ${esc(a.txt)}</span>
+   <button class="rail-btn" style="color:${a.lv==="crit"?"var(--red)":"var(--amber)"}"
+     onclick="open_('${a.id}')">SHOW</button></div>`).join("")+
+  (all.length>3?`<div class="rail-row"><span class="rail-text" style="color:var(--dim);font-size:10px">+${all.length-3} more</span></div>`:"");
+}
+function vitBlock(c){
+ if(!c.v)return`<div class="vitals"><div class="vit"><span class="k">Vitals</span>
+  <span class="v none">— not recorded</span></div></div>`;
+ const v=c.v,s=si(c),cl=x=>x>1.0?"crit":x>0.9?"caut":"ok";
+ return`<div class="vitals">
+  <div class="vit"><span class="k">BP</span><span class="v ${v.sbp<90?"crit":"ok"}">${v.sbp}/${v.dbp}</span></div>
+  <div class="vit"><span class="k">HR</span><span class="v ${v.hr>120?"caut":"ok"}">${v.hr}</span></div>
+  <div class="vit"><span class="k">RR</span><span class="v ${v.rr>30?"crit":"ok"}">${v.rr}</span></div>
+  <div class="vit"><span class="k">SpO₂</span><span class="v ${v.spo2<90?"crit":v.spo2<94?"caut":"ok"}">${v.spo2}</span></div>
+  ${s!==null?`<div class="vit"><span class="k">Shock idx</span><span class="v ${cl(s)}">${s}</span></div>`:""}</div>`;
+}
+function renderBoard(){preserveFocus("board",()=>{
+ document.getElementById("board").innerHTML=sorted().map(c=>{
+  const k=CATS[c.cat],d=directive(c);
+  return`<div class="card ${k}" onclick="open_('${c.id}')" ${makeFocusable("card-"+c.id,`open_('${c.id}')`)}
+    aria-label="Casualty ${esc(c.id)}, ${c.cat}, ${esc(d.m)}">
+   <div class="card-top"><span class="cid">${c.id}</span><span class="cat ${k}">${c.cat}</span></div>
+   <div class="card-mech">${c.mech.toUpperCase()} · FOUND ${hms(age(c))} AGO</div>
+   ${c.note?`<div class="card-note">${esc(c.note)}</div>`:""}
+   <div class="card-next ${d.lv}"><span class="k">Do this now</span>${esc(d.m)}</div>
+   ${c.tqs.map(t=>`<div class="clocks"><div class="clock ${tqLv(t)}">
+     <span class="k">TQ ${esc(t.limb)}${tqTag(t)}</span><span class="v tnum">${hms(tqEl(t))}</span></div></div>`).join("")}
+   ${vitBlock(c)}
+   <div class="assessed ${stale(c)?"stale":""}">
+    <span>Last assessed ${hms(since(c))} ago</span><span>${stale(c)?"STALE":""}</span></div></div>`;
+ }).join("");
+});}
+function renderDetail(){
+ const c=cas.find(x=>x.id===selected);if(!c)return;
+ const k=CATS[c.cat],d=directive(c);
+
+ const h=document.getElementById("detailHead");
+ h.innerHTML=`<button class="back" onclick="go('board')">← BOARD</button>
+  <span class="cid">${c.id}</span><span class="cat ${k}">${c.cat}</span>
+  <span class="lbl">${c.mech.toUpperCase()}</span>
+  <span class="lbl">Found ${hms(age(c))} ago</span>
+  ${c.note?`<span style="font-size:12px">${esc(c.note)}</span>`:""}
+  ${c.tqs.map(t=>`<span class="clock ${tqLv(t)}" style="margin-left:auto">
+    <span class="k">TQ ${esc(t.limb)}${tqTag(t)}</span>&nbsp;<span class="v tnum">${hms(tqEl(t))}</span></span>`).join("")}`;
+ h.style.borderLeftColor=k==="imm"?"var(--red)":k==="del"?"var(--amber)":k==="min"?"var(--phos)":"var(--dimmer)";
+
+ document.getElementById("directive").innerHTML=`<div class="directive ${d.lv}">
+  <div><span class="k">Do this now</span><div class="m">${esc(d.m)}</div>
+  <div class="w">${esc(d.w)}</div></div>
+  ${d.j?`<button class="jump" onclick="jump('${d.j}')">GO TO ${d.j.toUpperCase()}</button>`:""}
+  ${d.ob?`<button class="jump" onclick="doOb('${d.ob}')">MARK DONE</button>`:""}</div>`;
+
+ const ob=obligs(c);
+ document.getElementById("obligs").innerHTML=ob.length?`<div class="oblig">
+  <div class="oblig-head"><span>Reassessment obligations</span>
+   <span>${ob.filter(o=>o.state!=="ok").length} due</span></div>
+  ${ob.map(o=>`<div class="ob ${o.state}">
+    <div class="ob-t"><div class="ob-l">${o.label}</div><div class="ob-d">${o.detail}</div></div>
+    <span class="ob-c tnum">${o.state==="ok"?"in "+ms(o.rem):o.state==="due"?"DUE":"OVER "+ms(-o.rem)}</span>
+    <button class="ob-b" onclick="doOb('${o.id}')">DONE</button></div>`).join("")}</div>`:"";
+
+ preserveFocus("marchWrap",()=>{
+ document.getElementById("marchWrap").innerHTML=MARCH.map(p=>{
+  const tot=p.steps.length,dn=p.steps.filter(s=>c.d[s.id]).length;
+  const anyUrgent=p.steps.some(s=>isUrgent(c,s));
+  return`<div class="phase ${anyUrgent?"focus":""}" id="ph-${p.k}">
+   <div class="phase-head"><span class="letter">${p.letter}</span>
+    <div><div class="phase-title">${p.title}</div><div class="phase-prem">${p.premise}</div></div>
+    <span class="phase-prog"><b>${dn}</b>/${tot}</span></div>
+   ${p.steps.map(s=>{
+     const done=!!c.d[s.id],lock=lockOf(c,s),urg=isUrgent(c,s);
+     const cls=[done?"done":"",done&&!urg?"collapsed":"",lock&&!done?"locked":"",urg?"now":"",(!lock||done)?"act":""].join(" ");
+     const isClickable=!(lock&&!done)&&s.type!=="assess";
+     const click=isClickable?`onclick="toggle('${s.id}')" ${makeFocusable("step-"+s.id,`toggle('${s.id}')`)}`:"";
+     return`<div class="step ${cls}" ${click}>
+      <span class="box"></span>
+      <div class="step-body">
+       <div class="step-label">${s.label}
+        ${urg?'<span class="ntag">DO THIS NOW</span>':""}
+        ${s.gate?'<span class="gate">TRAINING REQUIRED</span>':""}
+        ${s.type==="assess"?'<span class="rtag">ASSESS</span>':""}</div>
+       ${(!done||urg)?`<div class="step-detail">${s.detail}</div>`:""}
+       ${(s.warn&&(!done||urg))?`<div class="step-warn">${s.warn}</div>`:""}
+       ${(lock&&!done)?`<div class="step-lock">🔒 ${esc(lock)}</div>`:""}
+       ${(s.type==="assess"&&!lock)?`<div class="finds">${s.opts.map(([val,lab,tone])=>
+          `<button class="find ${c.f[s.field]===val?"sel "+(tone==="bad"?"bad":""):""}"
+            onclick="setFind('${s.id}','${s.field}','${val}','${esc(lab)}')">${lab}</button>`).join("")}</div>`:""}
+       ${done&&c.st[s.id]!=null?`<div class="stamp">✓ ${hms(now()-c.st[s.id])} ago</div>`:""}
+      </div></div>`;}).join("")}</div>`;}).join("");
+ });
+
+ const F=[["Bleeding","bleed",{none:"None",extremity:"Extremity",junctional:"Junctional",ctrl:"Controlled"}],
+          ["Bleeding controlled","bleedCtrl",{yes:"Yes",no:"No"}],
+          ["Airway","airway",{patent:"Patent",noisy:"Noisy",absent:"Absent"}],
+          ["Chest","chest",{clear:"Clear",open:"Open wound",closed:"Closed injury"}],
+          ["Tension pneumo","tension",{no:"Excluded",suspect:"Suspected"}],
+          ["Perfusion","perf",{good:"Radial strong",weak:"Radial weak",absent:"No radial"}],
+          ["Consciousness","avpu",{A:"Alert",V:"Voice",P:"Pain",U:"Unresponsive"}]];
+ const BAD=["extremity","junctional","no","noisy","absent","open","closed","suspect","weak","V","P","U"];
+ document.getElementById("stateBox").innerHTML=F.map(([lab,key,map])=>{
+  const v=c.f[key];
+  return`<div class="state-row"><span class="k">${lab}</span>
+   <span class="v ${v==null?"unk":BAD.includes(v)?"bad":"good"}">${v==null?"— not assessed":map[v]}</span></div>`;
+ }).join("");
+
+ document.getElementById("mechBox").innerHTML=(MECH[c.mech]||MECH.unknown)
+  .map(x=>`<div class="mech-note">${x}</div>`).join("");
+ document.getElementById("logBox").innerHTML=c.log.length
+  ?[...c.log].reverse().slice(0,14).map(([t,w])=>
+    `<div class="logline"><span class="t tnum">-${hms(now()-t)}</span><span>${esc(w)}</span></div>`).join("")
+  :`<div class="mech-note" style="color:var(--dimmer)">No interventions logged</div>`;
+}
+
+/* ============ interaction ============ */
+function go(s){screen_=s;
+ document.querySelectorAll(".screen").forEach(e=>e.classList.toggle("on",e.id==="screen-"+s));
+ document.querySelectorAll("nav button[data-screen]").forEach(b=>b.classList.toggle("on",b.dataset.screen===s));
+ draw();}
+function open_(id){selected=id;go("detail");}
+function jump(k){const el=document.getElementById("ph-"+k);if(el)el.scrollIntoView({behavior:"smooth",block:"center"});}
+function toggle(id){
+ const c=cas.find(x=>x.id===selected),s=step_(id);if(!c||!s)return;
+ if(lockOf(c,s)&&!c.d[id])return;
+ if(c.d[id]){
+  // Reversing a checked step is a CORRECTION, not an undo — the original
+  // completion (c.st[id] and its log line) must stay on the record.
+  // Silently clearing c.st[id] here previously erased when the step was
+  // first done with no trace it ever happened.
+  const originalAt=c.st[id];
+  delete c.d[id];delete c.st[id];
+  c.log.push([now(),`${s.label} — marked NOT done (correction; was recorded ${hms(now()-originalAt)} ago)`]);
+  if(id==="m2"){
+   // The checklist just said "no tourniquet applied" — an open tq record
+   // (still ticking) would now directly contradict it. Close the record
+   // rather than deleting it: tqLv() treats `removed` like `conv` for
+   // clock purposes but renders it distinctly (see CSS .clock.removed),
+   // so the correction is visible, not silently forgotten.
+   const open=c.tqs.find(t=>t.conv==null&&t.removed==null);
+   if(open){open.removed=now();
+    c.log.push([now(),`Tourniquet ${open.limb} entry corrected — marked not applied`]);}
+  }
+ }
+ else{c.d[id]=1;c.st[id]=now();c.log.push([now(),s.label]);
+  if(id==="m2"){c.tqs.push({limb:"unspecified",applied:now(),conv:null,removed:null});c.ob.tq=now();}
+  if(id==="r2")c.ob.seal=now();
+  if(id==="r4")c.ob.decomp=now();
+  if(id==="a3"||id==="a5")c.ob.airway=now();}
+ c.seen=now();draw();}
+function setFind(sid,field,val,lab){
+ const c=cas.find(x=>x.id===selected);if(!c)return;
+ const s=step_(sid);if(lockOf(c,s))return;
+ c.f[field]=val;c.d[sid]=1;c.st[sid]=now();
+ c.log.push([now(),`${s.label}: ${lab}`]);
+ if(field==="airway")c.ob.airway=now();
+ c.seen=now();draw();}
+function doOb(id){
+ const c=cas.find(x=>x.id===selected);if(!c)return;
+ const o=OBLIGATIONS.find(x=>x.id===id);
+ c.ob[id]=now();c.seen=now();
+ if(o)c.log.push([now(),o.label]);
+ draw();}
+function addCasualty(){const c=mk({found:now(),seen:now(),note:"Unclassified"});cas.push(c);selected=c.id;go("board");}
+function markAssessed(){
+ // Only actionable from the detail screen, where `selected` is visibly
+ // the casualty on screen. From the triage board `selected` is still
+ // whatever was last opened (possibly on a previous visit, possibly
+ // never) and is not shown anywhere on that screen - acting on it there
+ // silently reassessed a casualty the operator wasn't looking at.
+ if(screen_!=="detail")return;
+ const c=cas.find(x=>x.id===selected);if(c){c.seen=now();draw();}}
+function renderActions(){
+ const btn=document.getElementById("btnMarkAssessed"),t=document.getElementById("btnMarkAssessedTitle");
+ const c=screen_==="detail"?cas.find(x=>x.id===selected):null;
+ btn.disabled=!c;
+ btn.style.opacity=c?"":".4";btn.style.cursor=c?"":"not-allowed";
+ t.textContent=c?`MARK ${c.id} REASSESSED`:"MARK REASSESSED — open a casualty first";
+}
+document.querySelectorAll("nav button[data-screen]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.screen)));
+
+function draw(){renderHeader();renderRail();renderActions();screen_==="board"?renderBoard():renderDetail();}
+draw();setInterval(draw,1000);
+</script>
+</body>
+</html>

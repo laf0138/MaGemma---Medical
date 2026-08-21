@@ -1,0 +1,19 @@
+        [Unit]
+        Description=SPECTER Trauma / Mass Casualty Module
+        After=network.target specter-mqtt.service
+
+        [Service]
+        Type=simple
+        User=specter
+        WorkingDirectory=/opt/specter
+        ExecStart=/opt/specter/venv/bin/python /opt/specter/trauma/specter_trauma.py --mqtt-host 192.168.1.1 --persist /var/lib/specter/scene.json
+        Restart=always
+        RestartSec=5
+        StateDirectory=specter
+StateDirectoryMode=0755
+StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=specter-trauma
+
+        [Install]
+        WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=SPECTER Kiwix Offline Library Server (Node 5)
+After=network.target
+
+[Service]
+Type=simple
+User=specter
+ExecStart=/usr/local/bin/kiwix-serve --port 8080 --threads 4 /mnt/specter/library/zim/*/*.zim
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-kiwix
+
+[Install]
+WantedBy=multi-user.target

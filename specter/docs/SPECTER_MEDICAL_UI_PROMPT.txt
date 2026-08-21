@@ -1,0 +1,95 @@
+SPECTER MEDICAL DISPLAY — UI GENERATION PROMPT v1
+==================================================
+
+Design the medical command screens for SPECTER, a field-deployable emergency medical and communications system built into a hard case with a 15" lid-mounted touchscreen. The operator is a Wilderness First Responder-trained layperson treating their own family in an austere environment, possibly at 3 AM, possibly wearing gloves, with no physician reachable. Two patients are immunosuppressed: one kidney transplant recipient on Belatacept, one on an RA biologic. The screen's single job is to let the operator see the whole physiologic story in one look and know within two seconds whether things are getting worse.
+
+ORGANIZING CONCEPT — THIS IS THE THING TO GET RIGHT
+
+The primary screen is a strip-chart recorder, not a grid of circular gauges. Card grids of gauges show isolated numbers and hide whether they are moving together. Render a dark field ruled with an ECG-paper grid — rust-colored hairlines at small-square and heavy-square intervals — with all vital sign traces plotted over it sharing one horizontal time axis, stacked in fixed lanes that never reorder. Blood pressure renders as classic up-caret/down-caret pairs with a shaded MAP band between them. Heart rate as connected dots. SpO2 and temperature as continuous lines. Glucose as discrete points. Events — infusion given, oral dose taken, wound photographed, AI query run — drop as vertical tick marks along a bottom rail. A draggable vertical scrub line reports every parameter's value at that instant in a floating readout.
+
+PALETTE — EXACTLY SIX VALUES, NO GRADIENTS EXCEPT THE MAP PERFUSION BAND
+
+  ground / page field ............ #0B1013   warm-shifted near-black, never pure black
+  panels ......................... #16202A
+  chart grid hairlines ........... #7C2D1E   12% opacity small squares, 26% heavy
+  primary text and numerals ...... #E8DCC8   paper-warm bone, not pure white
+  in-range values, stable traces . #4FD1A0   phosphor green
+  caution, stale data ............ #F0A830   amber
+  critical alarms ................ #E5484D   clinical red
+  cold chain, device telemetry ... #6BA8D6
+
+Color never carries meaning alone. Every critical state also changes marker shape, gains a text label, and appears in the alarm rail.
+
+TYPOGRAPHY
+
+IBM Plex family throughout — an engineering typeface with true tabular figures.
+
+  Vitals numerals ..... IBM Plex Sans Condensed 600, 72px hero / 44px secondary,
+                        font-variant-numeric: tabular-nums, so three-digit
+                        systolics align above two-digit diastolics
+  Labels, eyebrows .... IBM Plex Sans 500, 11px, 0.14em letter-spacing, uppercase
+  Body, AI output ..... IBM Plex Sans 400, 15px, 1.55 line-height
+  Timestamps, device
+  IDs, raw payload .... IBM Plex Mono 400, 12px
+
+Units set at 0.45x the numeral size at 60% opacity, baseline-aligned, never superscripted.
+
+SCREEN A — PATIENT (DEFAULT)
+
+A persistent 56px alarm rail pinned below the tab bar. In quiet state it shows patient name, a line reading "ALL PARAMETERS IN RANGE · LAST FULL SET 4m AGO", and the composite NEWS2 figure right-aligned. In alarm state it fills critical red, states the specific finding in plain language with the number that produced it — "MAP 58 mmHg — below graft perfusion threshold · 2m ago" — and offers exactly one action button. Maximum three stacked alarm rows.
+
+Below the rail, a CURRENT block showing seven live raw values at hero scale: blood pressure systolic/diastolic in mmHg, pulse in bpm, SpO2 percentage, temperature in Celsius, glucose in mg/dL, ECG rhythm classification, respiratory rate. Each carries an age stamp beneath in monospace. Values older than ten minutes shift to amber with the age stamp reading STALE. Values never measured this session render as an em-dash pair at 30% opacity labeled NOT MEASURED — never zero, never blank, never a plausible-looking placeholder.
+
+Beside it a DERIVED block showing six computed figures, none of which appear on any physical instrument: MAP calculated as diastolic plus one-third pulse pressure, pulse pressure, shock index as heart rate over systolic, NEWS2 aggregate score, qSOFA score, and fever burden in minutes above 38C over 24 hours. Tapping any figure slides a drawer showing the formula, exact input values with timestamps, reference band, and a caveat noting these scores are hospital-validated screening aids known to under-trigger in immunosuppressed patients whose inflammatory response is pharmacologically suppressed.
+
+Then the flowsheet occupying the majority of the screen, with 6h / 12h / 24h / 72h range controls. Then three primary actions at the foot: Record vitals, Manual entry, Ask MedGemma.
+
+SCREEN B — ASSESS
+
+MedGemma AI output. Top shows the operator's question in their own words with timestamp and a tappable chip revealing the exact vitals snapshot the model reasoned from.
+
+Then in fixed order:
+  1. The most time-critical concern, set at 20px in a bordered block.
+  2. The differential diagnosis as an ordered list, where each condition shows two
+     rows beneath it — "Supports:" with specific findings in phosphor green, and
+     "Argues against:" in amber.
+  3. Red flags, with what each would mean.
+  4. Recommended exams, priority-ordered, with checkboxes that open the matching
+     manual-entry field.
+  5. Field-achievable management steps, with anything beyond field capability
+     explicitly marked.
+  6. Evacuation threshold, in a bordered block, always last.
+  7. Source citations with title and page, linking to the offline Kiwix library.
+
+While inference runs, show the assembled context summary rather than a spinner. Persistent footer disclaimer, not a modal.
+
+SCREEN C — SUSTAIN
+
+Cold chain gets the most space: a 24-hour temperature trace with the 2-8C pharmaceutical band as the only shaded region on screen, current temperature at hero scale, power source, compressor duty, battery runtime remaining, and any past excursion marked permanently on the trace with duration and peak.
+
+Then two infusion countdown rows, Belatacept and RA biologic, showing days remaining at 44px, next-due date, and doses on hand — shifting amber inside 7 days and critical inside 2. When a dose is reconstituted, a 24-hour countdown takes over the entire row.
+
+Then compact oral maintenance rows. Then device health, one row per Bluetooth instrument showing name, connection state, RSSI as a four-bar glyph, and battery percentage, with disconnected devices sorted to top. Then system health: hub heartbeat, MQTT broker, Jetson RAM and temperature, Kiwix reachability, battery state of charge, solar input.
+
+MANUAL ENTRY SHEET
+
+Slides from bottom covering 70% of screen. Numeric fields use a custom 64px keypad, not the OS keyboard, because the operator may be gloved. Categorical fields use large tap targets, never dropdowns. Urinalysis renders as a visual strip matching the physical Multistix color chart, tapped block by block. Everything auto-timestamps.
+
+QUALITY FLOOR
+
+  - Touch targets minimum 44px; primary actions 64px.
+  - Critical actions reachable one-handed from the lower third of the screen.
+  - Every state carries shape and text alongside color.
+  - prefers-reduced-motion respected, with instant redraws.
+  - Visible keyboard focus throughout.
+  - A single daylight-mode inversion for reading in direct sun.
+  - No scrolling required for the alarm rail, current block, or derived block.
+  - Vitals-to-screen latency under 250ms.
+
+DO NOT INCLUDE
+
+  - Circular gauges.
+  - Animated pulse rings or decorative ECG squiggles that aren't real data.
+  - Fabricated confidence percentages on AI output.
+  - Modal dialogs for anything time-critical.
+  - Numbered section markers. Nothing here is a sequence.

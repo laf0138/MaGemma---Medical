@@ -1,0 +1,17 @@
+[Unit]
+Description=SPECTER MQTT Coordinator (node state aggregation)
+After=network.target specter-mqtt.service
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/core/mqtt_coordinator.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-coordinator
+
+[Install]
+WantedBy=multi-user.target

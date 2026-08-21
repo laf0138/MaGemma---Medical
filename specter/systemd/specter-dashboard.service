@@ -1,0 +1,17 @@
+[Unit]
+Description=SPECTER Dashboard Server (Flask + SocketIO)
+After=network.target specter-mqtt.service
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/dashboard/dashboard_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-dashboard
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=SPECTER Thermal Monitor (watchdog + emergency halt)
+After=network.target specter-mqtt.service
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/core/thermal_monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-thermal
+
+[Install]
+WantedBy=multi-user.target

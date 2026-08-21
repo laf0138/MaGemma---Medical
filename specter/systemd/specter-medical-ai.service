@@ -1,0 +1,17 @@
+[Unit]
+Description=SPECTER Medical AI Engine (MedGemma 4B on Jetson)
+After=network.target specter-ollama.service
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/medical/specter_medical_ai.py --mqtt-host 192.168.1.1 --model medgemma:4b --kiwix-host http://192.168.1.5:8080 --chroma-path /opt/specter/chroma
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-medical-ai
+
+[Install]
+WantedBy=multi-user.target

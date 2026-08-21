@@ -1,0 +1,12 @@
+[Unit]
+Description=SPECTER MQTT Broker (Mosquitto)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/mosquitto -c /etc/specter/mosquitto.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
