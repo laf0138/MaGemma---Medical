@@ -94,6 +94,22 @@ POLAR_H10_ECG_SAMPLE_RATE_HZ = 130  # H10 default per bleakheart's PMD docs;
                                      # ('ECG') below is called with no explicit
                                      # SAMPLE_RATE override.
 
+# Contour Next One glucose parsing (Bluetooth SIG Glucose Service 0x1808,
+# Glucose Measurement characteristic 0x2A18) - see parse_contour_glucometer
+# and the VERIFIED DEVICE GATE comment above BluetoothDeviceConfig.
+# Glucose (C6H12O6) molar mass, IUPAC 2021 standard atomic weights
+# (C 12.011, H 1.008, O 15.999): 6*12.011 + 12*1.008 + 6*15.999 = 180.156 g/mol.
+GLUCOSE_MOLAR_MASS_G_PER_MOL = 180.156
+# The device reports concentration in mol/L when the units flag is set (see
+# parse_contour_glucometer), not mmol/L, so this is derived directly from
+# the molar mass rather than borrowed from any particular app's mmol/L<->
+# mg/dL display constant (xDrip's own codebase has two slightly different
+# ones for that unrelated conversion - not applicable here).
+# mg/dL = (mol/L) * molar_mass(g/mol) * 1000(mg/g) / 10(dL/L)
+GLUCOSE_MOLL_TO_MGDL = GLUCOSE_MOLAR_MASS_G_PER_MOL * 100
+# mg/dL = (kg/L) * 1e6(mg/kg) / 10(dL/L)
+GLUCOSE_KGL_TO_MGDL = 100_000
+
 # Logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -165,16 +181,37 @@ class PatientVitals:
 #     has no SpO2 field under the Bluetooth spec. SpO2 lives in a
 #     separate standard characteristic (PLX Continuous Measurement,
 #     0x2A5F) with a different structure entirely.
-#   - braun_thermoscan / contour_next_one: the real standard
-#     Temperature Measurement (0x2A1C) and Glucose Measurement (0x2A18)
-#     characteristics both use IEEE-11073 float encodings inside a
-#     flags-dependent variable-length structure, not the fixed-width raw
-#     integers these parsers assume.
+#   - braun_thermoscan: worse than a wrong parser - the physical device
+#     this entry names, the plain "Braun ThermoScan 7" (IRT6520), has NO
+#     Bluetooth radio at all. It is a basic ear thermometer with a
+#     9-reading on-device memory button and no app or wireless sync.
+#     Braun sells a visually similar but distinct SKU, "ThermoScan 7+
+#     Connect", that does have BLE 5.0 and syncs to the Braun Family Care
+#     app - but SPECTER's kit names the non-Connect model, which cannot
+#     produce any BLE traffic to parse, real or otherwise (confirmed
+#     August 2026 against Braun's own US/UK product pages and independent
+#     reviews - see docs/MANUAL.md Part 7.4). This entry stays hard-blocked
+#     permanently unless the kit's hardware is swapped for the Connect
+#     model, which would need its own from-scratch protocol verification.
+#   - contour_next_one: FIXED August 2026. Confirmed via multiple
+#     independent sources (weliem/blessed-android, NightscoutFoundation/
+#     xDrip, Chakib-Temal/Android_BLE_Usb_Sensors) that the Contour Next
+#     One genuinely implements the standard Bluetooth SIG Glucose Service
+#     (0x1808) / Glucose Measurement characteristic (0x2A18) - unlike
+#     Omron, this one isn't proprietary. parse_contour_glucometer now
+#     decodes the real flags+SFLOAT structure (ported from xDrip's
+#     GlucoseReadingRx.java / BluetoothCHelper.java, cross-checked against
+#     the Bluetooth SIG GATT Specification Supplement). Still gated below:
+#     a correct decoder for a confirmed-standard protocol is lower risk
+#     than the other four, but "should be right" is not "hardware
+#     confirmed" - same standard SPECTER already held polar_h10 to.
 #   - collect_from_device() also only reads the FIRST characteristic
 #     listed per device ("Simplified: use first reading") and feeds its
 #     raw bytes to a parser expecting several characteristics' worth of
 #     combined data - a second, independent bug on top of the protocol
-#     mismatch above.
+#     mismatch above. Doesn't affect braun_thermoscan/contour_next_one
+#     (each lists exactly one characteristic), but still applies to
+#     omron_bp7450 and masimo_mightyssat.
 #
 # This is the same class of problem as the AliveCor KardiaMobile parser
 # that was removed in v1.1.0 for fabricating a characteristic that never
@@ -231,9 +268,9 @@ class BluetoothDeviceConfig:
         },
         'contour_next_one': {
             'name_pattern': 'Contour',
-            'service_uuid': '180a',
+            'service_uuid': '1808',  # Glucose Service (was 180a - wrong)
             'characteristic_uuids': {
-                'glucose': '2a18'
+                'glucose': '2a18'  # Glucose Measurement
             },
             'parser': 'parse_contour_glucometer'
         },
@@ -251,9 +288,40 @@ class BluetoothDeviceConfig:
 # BLUETOOTH DATA PARSERS
 # ============================================================================
 
+def _decode_sfloat(raw_le: bytes) -> Optional[float]:
+    """
+    Decode a 2-byte IEEE 11073-20601 SFLOAT (used by the Bluetooth SIG
+    Glucose Measurement characteristic, among others): a 12-bit signed
+    mantissa (two's complement) plus a 4-bit signed exponent (two's
+    complement), value = mantissa * 10**exponent, packed little-endian as
+    exponent in the top nibble and mantissa in the remaining 12 bits.
+
+    Returns None for the reserved sentinel mantissa values (NaN, NRes,
+    +/-INFINITY, reserved) per the spec, rather than silently decoding them
+    as a plausible-looking number - a device reporting "sensor error" must
+    not turn into a fabricated reading.
+
+    Ported from xDrip's BluetoothCHelper.getSfloat16() (NightscoutFoundation/
+    xDrip, GPLv3), cross-checked against the Bluetooth SIG GATT
+    Specification Supplement's SFLOAT definition.
+    """
+    if len(raw_le) != 2:
+        return None
+    raw = raw_le[0] | (raw_le[1] << 8)
+    mantissa_raw = raw & 0x0FFF
+    exponent_raw = (raw >> 12) & 0x0F
+
+    if mantissa_raw in (0x07FF, 0x0800, 0x07FE, 0x0802, 0x0801):
+        return None
+
+    mantissa = mantissa_raw - 0x1000 if mantissa_raw >= 0x0800 else mantissa_raw
+    exponent = exponent_raw - 0x10 if exponent_raw >= 0x08 else exponent_raw
+    return mantissa * (10 ** exponent)
+
+
 class MedicalDeviceParser:
     """Parse raw Bluetooth characteristic data into vital signs"""
-    
+
     @staticmethod
     def parse_omron_bp(data: bytes) -> Dict[str, Any]:
         """
@@ -325,17 +393,62 @@ class MedicalDeviceParser:
     @staticmethod
     def parse_contour_glucometer(data: bytes) -> Dict[str, Any]:
         """
-        Parse Contour Next One glucose meter data
-        Format: glucose in mg/dL (2 bytes, little-endian)
+        Parse Contour Next One glucose meter data: the standard Bluetooth
+        SIG Glucose Measurement characteristic (0x2A18), confirmed August
+        2026 to be what this device actually implements (see the VERIFIED
+        DEVICE GATE comment above BluetoothDeviceConfig). Ported from
+        xDrip's GlucoseReadingRx.java (NightscoutFoundation/xDrip, GPLv3),
+        cross-checked against the Bluetooth SIG GATT Specification
+        Supplement.
+
+        Layout (all multi-byte fields little-endian):
+          flags (1 byte):
+            bit0 time-offset present, bit1 glucose concentration present,
+            bit2 units (0=kg/L, 1=mol/L), bit3 sensor status present,
+            bit4 context info follows (ignored - context is a separate
+            optional characteristic this device kit doesn't read)
+          sequence number (uint16)
+          base time (7 bytes: year u16, month/day/hour/min/sec u8 each)
+          [time offset (sint16)]           - only if bit0 set
+          [glucose SFLOAT (2) + type/sample-location (1)] - only if bit1 set
+          [sensor status (uint16)]         - only if bit3 set
         """
         try:
-            if len(data) < 2:
+            if len(data) < 10:
+                logger.warning(f"Contour glucometer payload too short: {len(data)} bytes")
                 return {}
-            
-            glucose = int.from_bytes(data[0:2], 'little')
-            
+
+            flags = data[0]
+            glucose_present = bool(flags & 0x02)
+            units_mol_l = bool(flags & 0x04)
+            time_offset_present = bool(flags & 0x01)
+
+            if not glucose_present:
+                # A valid, well-formed measurement with no glucose reading
+                # (e.g. a context-only record) - not an error, just nothing
+                # to report this time.
+                return {}
+
+            offset = 10
+            if time_offset_present:
+                offset += 2
+
+            if len(data) < offset + 2:
+                logger.warning("Contour glucometer payload missing glucose field per its own flags")
+                return {}
+
+            concentration = _decode_sfloat(data[offset:offset + 2])
+            if concentration is None:
+                logger.warning("Contour glucometer reported an invalid/sensor-error glucose reading (SFLOAT NaN/INFINITY/reserved) - discarding rather than fabricating a value")
+                return {}
+
+            if units_mol_l:
+                glucose_mg_dl = concentration * GLUCOSE_MOLL_TO_MGDL
+            else:
+                glucose_mg_dl = concentration * GLUCOSE_KGL_TO_MGDL
+
             return {
-                'glucose_mg_dl': glucose
+                'glucose_mg_dl': round(glucose_mg_dl, 1)
             }
         except Exception as e:
             logger.error(f"Error parsing Contour glucometer data: {e}")
