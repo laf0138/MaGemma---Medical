@@ -28,7 +28,7 @@ START triage, but it is a memory aid for a trained responder, not instruction.
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import os
@@ -39,7 +39,7 @@ import argparse
 import threading
 from enum import Enum
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -51,7 +51,11 @@ def _mqtt_client(client_id: str = ""):
     try:
         return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     except (AttributeError, TypeError):
-        return _mqtt_client(client_id)
+        # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
+        # old-style constructor (deprecated but functional on 2.x too),
+        # NOT a recursive call to this same function, which would hit the
+        # same AttributeError every time and blow the stack.
+        return mqtt.Client(client_id=client_id)
 # ---------------------------------------------------------------------------
 
 # --- MQTT auth --------------------------------------------------------------
@@ -769,6 +773,7 @@ class SceneRegistry:
         self.scene_active = False
         self.persist_path = persist_path
         self._counter = 0
+        self._restore()
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -992,15 +997,124 @@ class SceneRegistry:
         }
 
     # ---- persistence ----------------------------------------------------
+    #
+    # Persists the RAW dataclass state (casualty_id, found_utc, every vitals
+    # entry, every intervention/tourniquet record, etc.) via dataclasses.
+    # asdict - not scene_summary(), which is a derived view for the MQTT/API
+    # consumers that collapses each casualty's vitals history down to just
+    # latest_vitals + a count. Persisting the summary would make a restart
+    # silently and irrecoverably drop every vitals reading but the last one,
+    # which is exactly the kind of quiet data loss this module exists to
+    # prevent.
 
     def _persist(self) -> None:
         try:
-            import os
-            os.makedirs(os.path.dirname(self.persist_path), exist_ok=True)
-            with open(self.persist_path, "w") as f:
-                json.dump(self.scene_summary(), f, indent=2)
+            raw = {
+                "format": 2,
+                "scene_active": self.scene_active,
+                "scene_opened_utc": self.scene_opened_utc,
+                "counter": self._counter,
+                "casualties": {cid: asdict(c) for cid, c in self.casualties.items()},
+            }
+            directory = os.path.dirname(self.persist_path) or "."
+            os.makedirs(directory, exist_ok=True)
+
+            # Atomic replace: write to a sibling temp file, fsync its
+            # contents to disk, then os.replace() (atomic on POSIX) so a
+            # crash or power loss mid-write can never leave scene.json
+            # truncated or half-written - the file on disk is always
+            # either the old complete state or the new complete state.
+            tmp_path = f"{self.persist_path}.tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(raw, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.persist_path)
+
+            try:
+                dir_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass  # best-effort - directory-entry fsync isn't universal
         except Exception as exc:
             logger.error("Could not persist scene: %s", exc)
+
+    def _restore(self) -> None:
+        """
+        Reload scene state from persist_path at startup, so a service
+        restart (crash, power loss, upgrade) resumes the active scene
+        instead of silently discarding it - see the docstring above
+        _persist(). A missing file (first run) is normal and not logged as
+        an error. A present-but-unreadable/corrupt file is logged loudly
+        and the registry starts empty rather than crashing the service -
+        losing the persisted scene is bad, but refusing to start the
+        trauma service during an actual incident is worse, and starting
+        silently with no evidence anything was lost would be worse still.
+        """
+        try:
+            raw_text = Path(self.persist_path).read_text()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.error("Could not read persisted scene %s: %s", self.persist_path, exc)
+            return
+
+        try:
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Persisted scene %s is corrupt (%s) - starting with an EMPTY scene. "
+                "The previous scene state may be unrecoverable.",
+                self.persist_path, exc,
+            )
+            return
+
+        if raw.get("format") != 2 or not isinstance(raw.get("casualties"), dict):
+            logger.error(
+                "Persisted scene %s is not in the expected format (old build, or "
+                "hand-edited) - starting with an EMPTY scene rather than guessing "
+                "at its structure.",
+                self.persist_path,
+            )
+            return
+
+        casualty_field_names = {f.name for f in dataclass_fields(Casualty)}
+        intervention_field_names = {f.name for f in dataclass_fields(Intervention)}
+        tourniquet_field_names = {f.name for f in dataclass_fields(TourniquetRecord)}
+
+        restored: Dict[str, Casualty] = {}
+        for cid, cdict in raw.get("casualties", {}).items():
+            try:
+                interventions = [
+                    Intervention(**{k: v for k, v in i.items() if k in intervention_field_names})
+                    for i in cdict.get("interventions", [])
+                ]
+                tourniquets = [
+                    TourniquetRecord(**{k: v for k, v in t.items() if k in tourniquet_field_names})
+                    for t in cdict.get("tourniquets", [])
+                ]
+                fields_only = {k: v for k, v in cdict.items() if k in casualty_field_names}
+                fields_only["interventions"] = interventions
+                fields_only["tourniquets"] = tourniquets
+                restored[cid] = Casualty(**fields_only)
+            except (TypeError, KeyError) as exc:
+                logger.error(
+                    "Skipping unrecoverable casualty record %s in %s: %s",
+                    cid, self.persist_path, exc,
+                )
+
+        self.casualties = restored
+        self.scene_active = bool(raw.get("scene_active", False))
+        self.scene_opened_utc = raw.get("scene_opened_utc") or utcnow()
+        self._counter = int(raw.get("counter", len(restored)))
+        logger.info(
+            "Restored %d casualt%s from %s (scene_active=%s)",
+            len(restored), "y" if len(restored) == 1 else "ies",
+            self.persist_path, self.scene_active,
+        )
 
 
 # ===========================================================================

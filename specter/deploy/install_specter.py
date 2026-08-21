@@ -192,10 +192,17 @@ APT_PACKAGES = [
     "libsoapysdr-dev", "soapysdr-tools",
 ]
 
+# Pinned where this repo's own test suite (requirements-dev.txt) actually
+# exercises the package - an unpinned install months from now can pull a
+# materially different, untested version onto a field kit. scipy/
+# soundfile/pyaudio/pyserial/gps3/matplotlib are real Pi-hardware
+# dependencies (audio capture, GPS, RF plotting) this repo's test suite
+# doesn't cover, so they aren't pinned here yet - do that once they have
+# their own verified-version pass, don't guess.
 PIP_PACKAGES = [
-    "numpy", "scipy", "soundfile", "pyaudio",
-    "paho-mqtt", "flask", "flask-socketio",
-    "eventlet", "requests",
+    "numpy==2.4.6", "scipy", "soundfile", "pyaudio",
+    "paho-mqtt==2.1.0", "flask==3.1.3", "flask-socketio==5.6.1",
+    "eventlet==0.41.2", "requests==2.33.1",
     "pyserial", "gps3",
     "matplotlib",
 ]

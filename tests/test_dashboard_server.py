@@ -91,7 +91,15 @@ class TestOnPiStatus:
         mqtt._on_pi_status("shtf/pi/pi3/status", {"cpu": 50})
         assert ds.STATE["pis"]["pi3"]["data"] == {"cpu": 50}
         assert ds.STATE["pis"]["pi3"]["last_seen"] > 0
-        assert mqtt.pushed == [("pi_status", {"pi": "pi3", "data": {"cpu": 50}})]
+        # last_seen must travel with the push, not just live in STATE - the
+        # client has no other way to judge node health over time (see
+        # applyNodeHealthDot/refreshNodeHealth in dashboard.html).
+        assert len(mqtt.pushed) == 1
+        event, payload = mqtt.pushed[0]
+        assert event == "pi_status"
+        assert payload["pi"] == "pi3"
+        assert payload["data"] == {"cpu": 50}
+        assert payload["last_seen"] == ds.STATE["pis"]["pi3"]["last_seen"]
 
 
 class TestOnDfBearing:
@@ -184,7 +192,15 @@ class TestOnAlarm:
         mqtt._on_alarm("shtf/system/alarm", {"level": "critical", "text": "thermal shutdown"})
         assert len(ds.STATE["alarms"]) == 1
         assert ds.STATE["alarms"][0]["data"] == {"level": "critical", "text": "thermal shutdown"}
-        assert mqtt.pushed == [("alarm", {"level": "critical", "text": "thermal shutdown"})]
+        # The push must carry the same {time, data} shape as STATE["alarms"]
+        # entries - a bare `data` push (the old behavior) gives the client
+        # no real timestamp, so it falls back to "whenever the browser
+        # happened to render it" instead of the actual event time.
+        assert len(mqtt.pushed) == 1
+        event, payload = mqtt.pushed[0]
+        assert event == "alarm"
+        assert payload["data"] == {"level": "critical", "text": "thermal shutdown"}
+        assert payload["time"] == ds.STATE["alarms"][0]["time"]
 
     def test_alarm_history_bounded_to_last_20(self, mqtt):
         for i in range(25):
@@ -203,6 +219,31 @@ class TestOnSystemState:
         before = dict(ds.STATE["system"])
         mqtt._on_system_state("shtf/system/state", "garbage")
         assert ds.STATE["system"] == before
+
+
+class _FakeMqttClient:
+    def subscribe(self, *a, **k):
+        pass
+
+
+class TestBrokerConnectionStatus:
+    """mqtt_connected in STATE/mqtt_status push must reflect the real
+    broker connection - previously nothing tracked this at all and the
+    dashboard footer's MQTT indicator was permanently static text."""
+
+    def test_connect_with_rc_zero_sets_connected_true(self, mqtt):
+        mqtt._on_broker_connect(_FakeMqttClient(), None, None, 0)
+        assert ds.STATE["mqtt_connected"] is True
+
+    def test_connect_with_nonzero_rc_leaves_connected_false(self, mqtt):
+        mqtt._on_broker_connect(_FakeMqttClient(), None, None, 5)
+        assert ds.STATE["mqtt_connected"] is False
+
+    def test_disconnect_sets_connected_false(self, mqtt):
+        mqtt._on_broker_connect(_FakeMqttClient(), None, None, 0)
+        assert ds.STATE["mqtt_connected"] is True
+        mqtt._on_broker_disconnect(_FakeMqttClient(), None, 1)
+        assert ds.STATE["mqtt_connected"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +283,15 @@ class TestHttpRoutes:
         resp = client.get("/")
         assert resp.status_code == 200
 
+    def test_resus_route_serves_resus_html(self, client):
+        # docs/SPECTER_MEDICAL_UI_BRIEF.md and the trauma docs both point
+        # operators at /resus, but only "/", "/api/state", "/api/status"
+        # were ever routed - the file was only reachable (if at all) via
+        # Flask's static handler at a different, undocumented URL.
+        resp = client.get("/resus")
+        assert resp.status_code == 200
+        assert b"<html" in resp.data.lower()
+
     def test_api_state_returns_current_state(self, client):
         ds.STATE["tx"]["status"] = "idle-test-marker"
         resp = client.get("/api/state")
@@ -254,3 +304,25 @@ class TestHttpRoutes:
         assert resp.status_code == 200
         assert data["service"] == "specter-dashboard"
         assert data["ok"] is True
+
+    def test_api_status_uptime_is_process_elapsed_not_epoch(self, client):
+        # Previously "uptime" was int(time.time()) - the Unix epoch, not
+        # elapsed time - so it read as billions of seconds of uptime.
+        resp = client.get("/api/status")
+        uptime = resp.get_json()["uptime"]
+        assert 0 <= uptime < 3600  # test process has been up for seconds, not decades
+
+
+class TestSecretKeyAndCors:
+    def test_secret_key_is_not_the_old_hardcoded_value(self):
+        # A secret hardcoded in source is the same value on every install
+        # (it's in the git repo) - not a secret. Must be config-driven or
+        # randomly generated instead.
+        assert ds.app.config["SECRET_KEY"] != "specter-dashboard-key"
+
+    def test_cors_allowed_origins_defaults_to_same_origin_only(self):
+        # cors_allowed_origins="*" let any origin's page drive this
+        # dashboard's WebSocket. None (flask-socketio's same-origin
+        # default) unless the installer explicitly configures a trusted
+        # origin list in specter.json.
+        assert ds.socketio.server.eio.cors_allowed_origins != "*"

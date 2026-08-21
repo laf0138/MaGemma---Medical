@@ -43,6 +43,13 @@ nav button.on{color:var(--phos);background:var(--panel-2);box-shadow:inset 0 -2p
 .brand .name{font-size:16px;letter-spacing:.3em}
 .brand .meta{font-size:9px;color:var(--dimmer);letter-spacing:.1em;margin-top:2px}
 
+.mode-banner{background:rgba(240,176,40,.14);border-bottom:1px solid var(--amber-deep);
+  color:var(--amber);font-size:11px;letter-spacing:.08em;padding:6px 16px;
+  display:flex;align-items:center;gap:8px}
+.mode-banner b{letter-spacing:.14em}
+nav button.disabled{opacity:.4;cursor:not-allowed}
+nav button.disabled:hover{color:var(--dim);background:none}
+
 .rail{border-bottom:1px solid var(--edge);padding:8px 16px}
 .rail.quiet{background:rgba(63,224,160,.07);border-bottom-color:var(--phos-deep)}
 .rail.hot{background:rgba(255,77,77,.10);border-bottom-color:var(--red-deep)}
@@ -90,6 +97,8 @@ main{flex:1;padding:13px 16px;overflow:auto}
 .clock.caution{border-color:var(--amber-deep)}.clock.caution .v{color:var(--amber)}
 .clock.critical{border-color:var(--red-deep);background:rgba(255,77,77,.08)}
 .clock.critical .v{color:var(--red)}
+.clock.removed{opacity:.6}.clock.removed .v{color:var(--dim);text-decoration:line-through}
+.clock.converted .v{color:var(--phos)}
 .vitals{display:flex;gap:11px;flex-wrap:wrap;margin-top:8px;padding-top:7px;border-top:1px solid var(--edge)}
 .vit{display:flex;flex-direction:column}
 .vit .k{font-size:8px;letter-spacing:.12em;color:var(--dim)}
@@ -223,6 +232,7 @@ footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:v
   display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
 @media (max-width:900px){.two{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.card:focus-visible,.step.act:focus-visible{outline:2px solid var(--phos);outline-offset:2px}
 </style>
 </head>
 <body>
@@ -239,12 +249,18 @@ footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:v
   <nav>
     <button class="on" data-screen="board">Triage</button>
     <button data-screen="detail">MARCH</button>
-    <button>Ward</button><button>Chronic</button>
+    <button class="disabled" disabled title="Not installed - see docs/MANUAL.md Part 7.3">Ward — NOT INSTALLED</button>
+    <button class="disabled" disabled title="Not installed - see docs/MANUAL.md Part 7.3">Chronic — NOT INSTALLED</button>
   </nav>
   <div class="brand">
     <div class="name">SPECTER</div><div class="meta">RESUS · HUB-7F3A</div>
   </div>
 </header>
+
+<div class="mode-banner" role="status">
+  <b>⚠ DEMO MODE</b>
+  <span>This screen is running on locally-generated sample casualties, not live data. It does not consume the trauma service's MQTT state (shtf/trauma/#) yet — see docs/MANUAL.md Part 7.4. Nothing entered here reaches the trauma service or any other operator's screen.</span>
+</div>
 
 <div class="rail" id="rail"></div>
 
@@ -279,10 +295,10 @@ footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:v
 <div class="actions">
   <button class="act p" onclick="addCasualty()">
     <div class="t">+ ADD CASUALTY</div><div class="s">One tap. Classify after.</div></button>
-  <button class="act a" onclick="markAssessed()">
-    <div class="t">MARK REASSESSED</div><div class="s">Clears the staleness clock</div></button>
-  <button class="act v">
-    <div class="t">ASK MEDGEMMA</div><div class="s">Available — never blocks the protocol</div></button>
+  <button class="act a" id="btnMarkAssessed" onclick="markAssessed()">
+    <div class="t" id="btnMarkAssessedTitle">MARK REASSESSED</div><div class="s">Clears the staleness clock</div></button>
+  <button class="act v" disabled style="opacity:.45;cursor:not-allowed">
+    <div class="t">ASK MEDGEMMA — NOT INSTALLED</div><div class="s">Not wired to this screen yet - medical_ai.py runs as a separate MQTT service (see docs/MANUAL.md Part 7.4)</div></button>
 </div>
 
 <footer>
@@ -473,8 +489,9 @@ function mk(o){seq++;return Object.assign({
 const age=c=>now()-c.found;
 const since=c=>now()-c.seen;
 const stale=c=>since(c)>(STALE[c.cat]||900);
-const tqEl=t=>t.conv!=null?t.conv-t.applied:now()-t.applied;
-const tqLv=t=>t.conv!=null?"converted":(tqEl(t)/3600>=4?"critical":tqEl(t)/3600>=2?"caution":"normal");
+const tqEl=t=>t.conv!=null?t.conv-t.applied:t.removed!=null?t.removed-t.applied:now()-t.applied;
+const tqLv=t=>t.conv!=null?"converted":t.removed!=null?"removed":(tqEl(t)/3600>=4?"critical":tqEl(t)/3600>=2?"caution":"normal");
+const tqTag=t=>t.conv!=null?" · CONVERTED":t.removed!=null?" · REMOVED (correction)":"";
 const si=c=>c.v&&c.v.sbp?+(c.v.hr/c.v.sbp).toFixed(2):null;
 
 const cas=[
@@ -581,6 +598,34 @@ function alertsFor(c){
 const sorted=()=>[...cas].sort((a,b)=>(RANK[a.cat]-RANK[b.cat])||(stale(b)-stale(a))||(since(b)-since(a)));
 const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
 
+/* Every screen fully rebuilds its innerHTML once a second (draw() below) so
+   the reassessment/tourniquet clocks stay live without per-element timers.
+   That destroys focus on every tick, which is fine for plain text but
+   breaks keyboard operation of the now-focusable cards/steps below (see
+   makeFocusable). This re-finds and restores focus by the same data-fid
+   the element had before the rebuild, inside the one container that was
+   rebuilt, instead of re-rendering everything less often. */
+function preserveFocus(containerId,renderFn){
+ const container=document.getElementById(containerId);
+ const active=document.activeElement;
+ const fid=(active&&container&&container.contains(active))?active.dataset.fid:null;
+ renderFn();
+ if(fid){
+  const el=container.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
+  if(el)el.focus({preventScroll:true});
+ }
+}
+
+/* Cards and checklist steps were plain clickable <div>s - invisible and
+   inert to keyboard/assistive-tech users, who had no way to reach or
+   activate them at all. This produces the attribute string shared by
+   every generated clickable div: focusable, announced as a button, and
+   operable with Enter/Space in addition to click. */
+function makeFocusable(fid,onActivate){
+ return `tabindex="0" role="button" data-fid="${esc(fid)}" `+
+  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${onActivate}}"`;
+}
+
 /* ============ render ============ */
 function renderHeader(){
  document.getElementById("sceneClock").textContent=hms(now()+1400);
@@ -615,21 +660,22 @@ function vitBlock(c){
   <div class="vit"><span class="k">SpO₂</span><span class="v ${v.spo2<90?"crit":v.spo2<94?"caut":"ok"}">${v.spo2}</span></div>
   ${s!==null?`<div class="vit"><span class="k">Shock idx</span><span class="v ${cl(s)}">${s}</span></div>`:""}</div>`;
 }
-function renderBoard(){
+function renderBoard(){preserveFocus("board",()=>{
  document.getElementById("board").innerHTML=sorted().map(c=>{
   const k=CATS[c.cat],d=directive(c);
-  return`<div class="card ${k}" onclick="open_('${c.id}')">
+  return`<div class="card ${k}" onclick="open_('${c.id}')" ${makeFocusable("card-"+c.id,`open_('${c.id}')`)}
+    aria-label="Casualty ${esc(c.id)}, ${c.cat}, ${esc(d.m)}">
    <div class="card-top"><span class="cid">${c.id}</span><span class="cat ${k}">${c.cat}</span></div>
    <div class="card-mech">${c.mech.toUpperCase()} · FOUND ${hms(age(c))} AGO</div>
    ${c.note?`<div class="card-note">${esc(c.note)}</div>`:""}
    <div class="card-next ${d.lv}"><span class="k">Do this now</span>${esc(d.m)}</div>
    ${c.tqs.map(t=>`<div class="clocks"><div class="clock ${tqLv(t)}">
-     <span class="k">TQ ${esc(t.limb)}</span><span class="v tnum">${hms(tqEl(t))}</span></div></div>`).join("")}
+     <span class="k">TQ ${esc(t.limb)}${tqTag(t)}</span><span class="v tnum">${hms(tqEl(t))}</span></div></div>`).join("")}
    ${vitBlock(c)}
    <div class="assessed ${stale(c)?"stale":""}">
     <span>Last assessed ${hms(since(c))} ago</span><span>${stale(c)?"STALE":""}</span></div></div>`;
  }).join("");
-}
+});}
 function renderDetail(){
  const c=cas.find(x=>x.id===selected);if(!c)return;
  const k=CATS[c.cat],d=directive(c);
@@ -641,7 +687,7 @@ function renderDetail(){
   <span class="lbl">Found ${hms(age(c))} ago</span>
   ${c.note?`<span style="font-size:12px">${esc(c.note)}</span>`:""}
   ${c.tqs.map(t=>`<span class="clock ${tqLv(t)}" style="margin-left:auto">
-    <span class="k">TQ ${esc(t.limb)}</span>&nbsp;<span class="v tnum">${hms(tqEl(t))}</span></span>`).join("")}`;
+    <span class="k">TQ ${esc(t.limb)}${tqTag(t)}</span>&nbsp;<span class="v tnum">${hms(tqEl(t))}</span></span>`).join("")}`;
  h.style.borderLeftColor=k==="imm"?"var(--red)":k==="del"?"var(--amber)":k==="min"?"var(--phos)":"var(--dimmer)";
 
  document.getElementById("directive").innerHTML=`<div class="directive ${d.lv}">
@@ -659,6 +705,7 @@ function renderDetail(){
     <span class="ob-c tnum">${o.state==="ok"?"in "+ms(o.rem):o.state==="due"?"DUE":"OVER "+ms(-o.rem)}</span>
     <button class="ob-b" onclick="doOb('${o.id}')">DONE</button></div>`).join("")}</div>`:"";
 
+ preserveFocus("marchWrap",()=>{
  document.getElementById("marchWrap").innerHTML=MARCH.map(p=>{
   const tot=p.steps.length,dn=p.steps.filter(s=>c.d[s.id]).length;
   const anyUrgent=p.steps.some(s=>isUrgent(c,s));
@@ -669,7 +716,8 @@ function renderDetail(){
    ${p.steps.map(s=>{
      const done=!!c.d[s.id],lock=lockOf(c,s),urg=isUrgent(c,s);
      const cls=[done?"done":"",done&&!urg?"collapsed":"",lock&&!done?"locked":"",urg?"now":"",(!lock||done)?"act":""].join(" ");
-     const click=(lock&&!done)?"":(s.type==="assess"?"":`onclick="toggle('${s.id}')"`);
+     const isClickable=!(lock&&!done)&&s.type!=="assess";
+     const click=isClickable?`onclick="toggle('${s.id}')" ${makeFocusable("step-"+s.id,`toggle('${s.id}')`)}`:"";
      return`<div class="step ${cls}" ${click}>
       <span class="box"></span>
       <div class="step-body">
@@ -685,6 +733,7 @@ function renderDetail(){
             onclick="setFind('${s.id}','${s.field}','${val}','${esc(lab)}')">${lab}</button>`).join("")}</div>`:""}
        ${done&&c.st[s.id]!=null?`<div class="stamp">✓ ${hms(now()-c.st[s.id])} ago</div>`:""}
       </div></div>`;}).join("")}</div>`;}).join("");
+ });
 
  const F=[["Bleeding","bleed",{none:"None",extremity:"Extremity",junctional:"Junctional",ctrl:"Controlled"}],
           ["Bleeding controlled","bleedCtrl",{yes:"Yes",no:"No"}],
@@ -718,9 +767,27 @@ function jump(k){const el=document.getElementById("ph-"+k);if(el)el.scrollIntoVi
 function toggle(id){
  const c=cas.find(x=>x.id===selected),s=step_(id);if(!c||!s)return;
  if(lockOf(c,s)&&!c.d[id])return;
- if(c.d[id]){delete c.d[id];delete c.st[id];}
+ if(c.d[id]){
+  // Reversing a checked step is a CORRECTION, not an undo — the original
+  // completion (c.st[id] and its log line) must stay on the record.
+  // Silently clearing c.st[id] here previously erased when the step was
+  // first done with no trace it ever happened.
+  const originalAt=c.st[id];
+  delete c.d[id];delete c.st[id];
+  c.log.push([now(),`${s.label} — marked NOT done (correction; was recorded ${hms(now()-originalAt)} ago)`]);
+  if(id==="m2"){
+   // The checklist just said "no tourniquet applied" — an open tq record
+   // (still ticking) would now directly contradict it. Close the record
+   // rather than deleting it: tqLv() treats `removed` like `conv` for
+   // clock purposes but renders it distinctly (see CSS .clock.removed),
+   // so the correction is visible, not silently forgotten.
+   const open=c.tqs.find(t=>t.conv==null&&t.removed==null);
+   if(open){open.removed=now();
+    c.log.push([now(),`Tourniquet ${open.limb} entry corrected — marked not applied`]);}
+  }
+ }
  else{c.d[id]=1;c.st[id]=now();c.log.push([now(),s.label]);
-  if(id==="m2"){c.tqs.push({limb:"unspecified",applied:now(),conv:null});c.ob.tq=now();}
+  if(id==="m2"){c.tqs.push({limb:"unspecified",applied:now(),conv:null,removed:null});c.ob.tq=now();}
   if(id==="r2")c.ob.seal=now();
   if(id==="r4")c.ob.decomp=now();
   if(id==="a3"||id==="a5")c.ob.airway=now();}
@@ -739,10 +806,24 @@ function doOb(id){
  if(o)c.log.push([now(),o.label]);
  draw();}
 function addCasualty(){const c=mk({found:now(),seen:now(),note:"Unclassified"});cas.push(c);selected=c.id;go("board");}
-function markAssessed(){const c=cas.find(x=>x.id===selected);if(c){c.seen=now();draw();}}
+function markAssessed(){
+ // Only actionable from the detail screen, where `selected` is visibly
+ // the casualty on screen. From the triage board `selected` is still
+ // whatever was last opened (possibly on a previous visit, possibly
+ // never) and is not shown anywhere on that screen - acting on it there
+ // silently reassessed a casualty the operator wasn't looking at.
+ if(screen_!=="detail")return;
+ const c=cas.find(x=>x.id===selected);if(c){c.seen=now();draw();}}
+function renderActions(){
+ const btn=document.getElementById("btnMarkAssessed"),t=document.getElementById("btnMarkAssessedTitle");
+ const c=screen_==="detail"?cas.find(x=>x.id===selected):null;
+ btn.disabled=!c;
+ btn.style.opacity=c?"":".4";btn.style.cursor=c?"":"not-allowed";
+ t.textContent=c?`MARK ${c.id} REASSESSED`:"MARK REASSESSED — open a casualty first";
+}
 document.querySelectorAll("nav button[data-screen]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.screen)));
 
-function draw(){renderHeader();renderRail();screen_==="board"?renderBoard():renderDetail();}
+function draw(){renderHeader();renderRail();renderActions();screen_==="board"?renderBoard():renderDetail();}
 draw();setInterval(draw,1000);
 </script>
 </body>

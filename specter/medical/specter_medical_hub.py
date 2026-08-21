@@ -38,7 +38,11 @@ def _mqtt_client(client_id: str = ""):
     try:
         return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     except (AttributeError, TypeError):
-        return _mqtt_client(client_id)
+        # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
+        # old-style constructor (deprecated but functional on 2.x too),
+        # NOT a recursive call to this same function, which would hit the
+        # same AttributeError every time and blow the stack.
+        return mqtt.Client(client_id=client_id)
 # ---------------------------------------------------------------------------
 
 # --- MQTT auth --------------------------------------------------------------

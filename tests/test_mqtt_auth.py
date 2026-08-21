@@ -273,3 +273,60 @@ class TestDashboardMQTTAuth:
             broker="192.168.1.1", port=1883, username="cuser", password="cpass")
         assert m.username == "cuser"
         assert m.password == "cpass"
+
+
+# ---------------------------------------------------------------------------
+# _mqtt_client() paho-mqtt 1.x/2.x compatibility fallback
+#
+# On paho-mqtt 1.x, mqtt.CallbackAPIVersion does not exist, so
+# `mqtt.CallbackAPIVersion.VERSION1` raises AttributeError before Client()
+# is even reached. The except branch used to call _mqtt_client() again
+# instead of falling back to the old-style constructor - since the
+# AttributeError is deterministic (the attribute either exists or it
+# doesn't), every retry hit the exact same error, recursing until
+# RecursionError, which could prevent trauma/medical services from
+# starting at all on that paho-mqtt version. These simulate that
+# environment by removing CallbackAPIVersion, without needing an actual
+# paho-mqtt 1.x install.
+# ---------------------------------------------------------------------------
+
+class _Paho1xStubClient:
+    """Stands in for paho-mqtt 1.x's Client(client_id=...) constructor."""
+    def __init__(self, client_id=""):
+        self.client_id = client_id
+
+
+class _Paho1xStubModule:
+    """
+    Stands in for the `paho.mqtt.client` module as it looks on paho-mqtt
+    1.x: Client() takes no callback_api_version argument, and
+    CallbackAPIVersion does not exist at all - accessing it raises
+    AttributeError, exactly like the real 1.x module does. Deleting
+    CallbackAPIVersion from the real (2.x) module instead would break
+    paho's own Client.__init__, which references that name internally -
+    this stub avoids touching real paho internals at all.
+    """
+    Client = _Paho1xStubClient
+
+
+class TestMqttClientCompatFallback:
+    MODULES = [trauma_mod, trauma_monitor_mod, medical_ai_mod, medical_hub_mod]
+
+    @pytest.mark.parametrize("mod", MODULES, ids=lambda m: m.__name__)
+    def test_returns_client_on_current_paho_version(self, mod):
+        client = mod._mqtt_client("test-client-id")
+        assert client is not None
+
+    @pytest.mark.parametrize("mod", MODULES, ids=lambda m: m.__name__)
+    def test_falls_back_without_recursing_on_paho_1x(self, mod, monkeypatch):
+        monkeypatch.setattr(mod, "mqtt", _Paho1xStubModule())
+        # Must return a real client via the old-style constructor, not
+        # recurse into itself and blow the stack with RecursionError -
+        # which is exactly what happened before this was fixed (the
+        # except branch called _mqtt_client() again instead of falling
+        # back to mqtt.Client(client_id=...), and the AttributeError from
+        # a missing CallbackAPIVersion is deterministic, so every retry
+        # hit the identical error).
+        client = mod._mqtt_client("test-client-id")
+        assert isinstance(client, _Paho1xStubClient)
+        assert client.client_id == "test-client-id"

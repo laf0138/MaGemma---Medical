@@ -368,6 +368,77 @@ class TestSceneRegistry:
 
 
 # ---------------------------------------------------------------------------
+# SceneRegistry persistence - restart must restore the active scene, not
+# just write scene.json and never read it back (see _persist/_restore
+# docstrings in specter_trauma.py).
+# ---------------------------------------------------------------------------
+
+class TestSceneRegistryPersistence:
+    def test_restart_restores_full_casualty_state(self, tmp_path):
+        path = str(tmp_path / "scene.json")
+        r1 = SceneRegistry(persist_path=path)
+        r1.open_scene()
+        c = r1.add_casualty(mechanism="blast", notes="restore me")
+        r1.triage(c.casualty_id, category="IMMEDIATE")
+        r1.log_intervention(c.casualty_id, "tourniquet", site="right_leg", notes="windlass")
+        r1.record_vitals(c.casualty_id, {"pulse": 130, "bp_systolic": 80})
+        r1.record_vitals(c.casualty_id, {"pulse": 128, "bp_systolic": 82})
+
+        r2 = SceneRegistry(persist_path=path)
+
+        assert r2.scene_active is True
+        restored = r2.get(c.casualty_id)
+        assert restored is not None
+        assert restored.mechanism == "blast"
+        assert restored.notes == "restore me"
+        assert restored.triage_category == "IMMEDIATE"
+        # The full vitals history must survive, not just the latest reading -
+        # scene_summary() (the old persisted shape) only keeps latest_vitals.
+        assert len(restored.vitals) == 2
+        assert restored.vitals[0]["pulse"] == 130
+        assert restored.vitals[1]["pulse"] == 128
+        assert len(restored.tourniquets) == 1
+        assert restored.tourniquets[0].site == "right_leg"
+        assert restored.tourniquets[0].applied_utc  # real timestamp survived
+
+    def test_restart_does_not_reuse_casualty_ids(self, tmp_path):
+        path = str(tmp_path / "scene.json")
+        r1 = SceneRegistry(persist_path=path)
+        r1.add_casualty()
+        r1.add_casualty()
+
+        r2 = SceneRegistry(persist_path=path)
+        c3 = r2.add_casualty()
+        assert c3.casualty_id == "C-3"
+
+    def test_no_persisted_file_starts_with_empty_scene(self, tmp_path):
+        r = SceneRegistry(persist_path=str(tmp_path / "does_not_exist.json"))
+        assert r.casualties == {}
+        assert r.scene_active is False
+
+    def test_corrupt_persisted_file_starts_empty_without_raising(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text("{not valid json")
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_old_format_persisted_file_starts_empty_without_raising(self, tmp_path):
+        # scene_summary()-shaped file (the previous, write-only "persistence"
+        # format) - must not be misread as the new per-casualty format.
+        path = tmp_path / "scene.json"
+        path.write_text('{"scene_active": true, "casualties": [{"casualty_id": "C-1"}]}')
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_persist_writes_atomically_no_leftover_tmp_file(self, tmp_path):
+        path = tmp_path / "scene.json"
+        r = SceneRegistry(persist_path=str(path))
+        r.add_casualty()
+        assert path.exists()
+        assert not (tmp_path / "scene.json.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
 # Small time helpers
 # ---------------------------------------------------------------------------
 

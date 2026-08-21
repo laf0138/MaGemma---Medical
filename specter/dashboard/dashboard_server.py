@@ -16,18 +16,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, send_from_directory
+from flask import Flask, jsonify
 from flask_socketio import SocketIO, emit
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
 DASHBOARD_DIR = Path(__file__).parent
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+START_TIME = time.time()
 
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "dashboard"
@@ -70,14 +72,32 @@ STATE: dict = {
     "thermal": {"cpu_temp_c": 0, "throttle": {}},
     "alarms": [],
     "system": {"uptime": 0, "version": VERSION},
+    "mqtt_connected": False,
 }
 STATE_LOCK = threading.Lock()
 
 # ─── Flask / SocketIO ─────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder=str(DASHBOARD_DIR))
-app.config["SECRET_KEY"] = "specter-dashboard-key"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# A hardcoded secret here would be the same value in every SPECTER install
+# (it's in the git repo) - functionally no secret at all. Prefer an
+# operator-set value from specter.json (dashboard.secret_key, written once
+# by the installer) so it's install-specific and stable across restarts;
+# fall back to a random one generated at each startup, which is still a
+# real per-process secret, it just means any Flask session existing at
+# restart time is invalidated (there is no session-based feature relying
+# on that yet - see docs/MANUAL.md Part 7.4 on dashboard/RESUS auth gaps).
+app.config["SECRET_KEY"] = cfg.get("dashboard", {}).get("secret_key") or secrets.token_hex(32)
+# cors_allowed_origins="*" let ANY origin's page drive this dashboard's
+# WebSocket (including trigger_rx) via a browser that merely has LAN
+# access to it. Default to flask-socketio's same-origin-only behavior
+# (cors_allowed_origins=None) unless the installer explicitly configures a
+# list of trusted origins (e.g. a separate kiosk host) in specter.json.
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=cfg.get("dashboard", {}).get("cors_allowed_origins"),
+    async_mode="eventlet",
+)
 
 
 @app.route("/")
@@ -86,6 +106,14 @@ def index():
     if html_path.exists():
         return html_path.read_text()
     return "<h1>SPECTER Dashboard</h1><p>dashboard.html not found.</p>", 404
+
+
+@app.route("/resus")
+def resus():
+    html_path = DASHBOARD_DIR / "resus.html"
+    if html_path.exists():
+        return html_path.read_text()
+    return "<h1>SPECTER RESUS</h1><p>resus.html not found.</p>", 404
 
 
 @app.route("/api/state")
@@ -99,7 +127,7 @@ def api_status():
     return jsonify({
         "service": "specter-dashboard",
         "version": VERSION,
-        "uptime":  int(time.time()),
+        "uptime":  int(time.time() - START_TIME),
         "ok":      True,
     })
 
@@ -159,9 +187,15 @@ class DashboardMQTT:
 
     def _on_pi_status(self, topic: str, data):
         pi_name = topic.split("/")[2]
+        last_seen = time.time()
         with STATE_LOCK:
-            STATE["pis"][pi_name] = {"last_seen": time.time(), "data": data}
-        self._push("pi_status", {"pi": pi_name, "data": data})
+            STATE["pis"][pi_name] = {"last_seen": last_seen, "data": data}
+        # last_seen must travel with the push - it's the wrapper-level
+        # receive time the server stamps, not anything in `data` itself,
+        # and the client needs a real timestamp to judge node health
+        # against (see applyNodeHealthDot/refreshNodeHealth in
+        # dashboard.html) instead of assuming "just arrived = healthy".
+        self._push("pi_status", {"pi": pi_name, "data": data, "last_seen": last_seen})
 
     def _on_df_bearing(self, topic: str, data):
         with STATE_LOCK:
@@ -214,10 +248,17 @@ class DashboardMQTT:
         self._push("thermal", STATE["thermal"])
 
     def _on_alarm(self, topic: str, data):
+        # entry carries a real timestamp (when this service received the
+        # MQTT publish) alongside the alarm payload, and the same shape is
+        # used for the live push and the state.alarms replay on reconnect -
+        # the dashboard previously stamped alarms with whatever time the
+        # browser happened to render them, and the live push dropped the
+        # timestamp entirely (only `data` was sent).
+        entry = {"time": time.time(), "data": data}
         with STATE_LOCK:
-            STATE["alarms"].append({"time": time.time(), "data": data})
+            STATE["alarms"].append(entry)
             STATE["alarms"] = STATE["alarms"][-20:]
-        self._push("alarm", data)
+        self._push("alarm", entry)
         log.warning("ALARM: %s", data)
 
     def _on_system_state(self, topic: str, data):
@@ -242,12 +283,34 @@ class DashboardMQTT:
             return False
         return all(p == "+" or p == t for p, t in zip(p_parts, t_parts))
 
+    def _set_mqtt_connected(self, connected: bool) -> None:
+        with STATE_LOCK:
+            STATE["mqtt_connected"] = connected
+        socketio.emit("mqtt_status", {"connected": connected})
+
+    def _on_broker_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            log.info("MQTT connected")
+            client.subscribe("shtf/#")
+            self._set_mqtt_connected(True)
+        else:
+            log.warning("MQTT connect failed, rc=%s", rc)
+            self._set_mqtt_connected(False)
+
+    def _on_broker_disconnect(self, client, userdata, rc):
+        log.warning("MQTT disconnected (rc=%s)", rc)
+        self._set_mqtt_connected(False)
+
     def start(self):
         import paho.mqtt.client as mqtt
         client = mqtt.Client(client_id="specter_dashboard")
         client.username_pw_set(self.username, self.password)
-        client.on_connect = lambda c, u, f, rc: (
-            log.info("MQTT connected") or c.subscribe("shtf/#"))
+        # The footer's MQTT indicator was previously wired to nothing and
+        # permanently read "MQTT: —" regardless of whether the broker
+        # connection was actually up - on_connect/on_disconnect now push
+        # real state instead of a static placeholder.
+        client.on_connect = self._on_broker_connect
+        client.on_disconnect = self._on_broker_disconnect
         client.on_message = self._on_message
         try:
             client.connect(self.broker, self.port, 60)
@@ -256,6 +319,7 @@ class DashboardMQTT:
             log.info("Dashboard MQTT subscribed to shtf/#")
         except Exception as e:
             log.warning("MQTT unavailable: %s — dashboard running offline", e)
+            self._set_mqtt_connected(False)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

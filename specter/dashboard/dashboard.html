@@ -4,8 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SPECTER — Command Center</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<!-- Vendored locally (vendor/) - this dashboard must work with zero internet
+     access, which is the whole point of SPECTER. Loading these from a CDN
+     meant the "offline" dashboard silently failed (io/d3 undefined) on any
+     network without outbound internet. See vendor/README.md. -->
+<script src="/dashboard/vendor/socket.io.min.js"></script>
+<script src="/dashboard/vendor/d3.min.js"></script>
 <style>
   :root {
     --bg:        #050a0f;
@@ -150,6 +154,14 @@
 
   /* ── Waterfall ── */
   #waterfall-canvas { width: 100%; height: 100%; display: block; }
+  #waterfall-watermark {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%,-50%) rotate(-12deg);
+    color: rgba(255,170,0,0.5);
+    font-size: 20px; font-weight: bold; letter-spacing: 3px;
+    text-shadow: 0 0 8px rgba(0,0,0,0.8);
+    pointer-events: none; white-space: nowrap; text-align: center;
+  }
 
   /* ── RX Panel ── */
   .rx-stat { padding: 6px 0; border-bottom: 1px solid rgba(0,200,255,0.07); }
@@ -271,9 +283,10 @@
 
   <!-- Waterfall -->
   <div class="panel" id="panel-waterfall">
-    <div class="panel-title">SPECTRUM / WATERFALL</div>
-    <div class="panel-body" style="padding:0;">
+    <div class="panel-title">SPECTRUM / WATERFALL <span class="badge badge-warn" id="waterfall-badge">SIMULATED DATA</span></div>
+    <div class="panel-body" style="padding:0; position:relative;">
       <canvas id="waterfall-canvas"></canvas>
+      <div id="waterfall-watermark">SIMULATED DATA — NO LIVE RF FEED</div>
     </div>
   </div>
 
@@ -313,7 +326,7 @@
 
 <!-- ── Footer ── -->
 <div id="footer">
-  <span>SPECTER v1.0.0 — 192.168.1.x PoE MESH</span>
+  <span id="version-display">SPECTER — 192.168.1.x PoE MESH</span>
   <span id="mqtt-status">MQTT: —</span>
   <span id="uptime-display">UP: 00:00:00</span>
 </div>
@@ -420,7 +433,13 @@ function spectralColor(t) {
   return `rgb(255,${Math.round(255-(t-0.75)*4*255)},0)`;
 }
 
-// Demo waterfall (replaced by real MQTT data when available)
+// This waterfall is permanently simulated random noise. There is no real
+// RF waterfall MQTT topic, server-side handler, or SDR pipeline feeding
+// this panel anywhere in this codebase yet (the GNU Radio/KrakenSDR
+// flowgraphs are specified but not implemented - see docs/MANUAL.md Part
+// 7.3), so the "SIMULATED DATA" badge/watermark on this panel is not
+// conditional on anything and must stay visible - an operator must never
+// be able to mistake this for live RF telemetry.
 function fakeWaterfallTick() {
   const cols = 128;
   const row = Array.from({length:cols}, (_,i) => {
@@ -444,6 +463,31 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
+// Pull the version and uptime from the server instead of a hardcoded
+// string/placeholder that never changes - a hardcoded version is exactly
+// how the footer ends up permanently stuck reading "v1.0.0" no matter how
+// many fixes ship, and "UP: 00:00:00" with nothing updating it looks like
+// live telemetry but is not.
+let serverUptimeBaseSec = null;
+let serverUptimeFetchedAtMs = null;
+
+fetch('/api/status').then(r => r.json()).then(s => {
+  document.getElementById('version-display').textContent =
+    `SPECTER v${s.version} — 192.168.1.x PoE MESH`;
+  serverUptimeBaseSec = s.uptime;
+  serverUptimeFetchedAtMs = Date.now();
+}).catch(() => {});
+
+function updateUptimeDisplay() {
+  if (serverUptimeBaseSec === null) return;
+  const elapsed = serverUptimeBaseSec + (Date.now() - serverUptimeFetchedAtMs) / 1000;
+  const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+  const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+  const s = Math.floor(elapsed % 60).toString().padStart(2, '0');
+  document.getElementById('uptime-display').textContent = `UP: ${h}:${m}:${s}`;
+}
+setInterval(updateUptimeDisplay, 1000);
+
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 const socket = io();
 const connEl  = document.getElementById('conn-status');
@@ -463,7 +507,7 @@ socket.on('state', (state) => {
 });
 
 socket.on('pi_status', (data) => {
-  updatePiRow(data.pi, data.data);
+  updatePiRow(data.pi, data.data, data.last_seen);
 });
 
 socket.on('df_update', (data) => {
@@ -485,15 +529,24 @@ socket.on('sdr_status', (data) => {
   updateSDRStatus(data.devices || {});
 });
 
-socket.on('alarm', (data) => {
-  addAlarm(data);
+socket.on('alarm', (entry) => {
+  addAlarm(entry.data, entry.time * 1000);
 });
+
+socket.on('mqtt_status', (data) => {
+  setMqttStatus(data.connected);
+});
+
+function setMqttStatus(connected) {
+  mqttEl.textContent = connected ? 'MQTT: CONNECTED' : 'MQTT: DOWN';
+  mqttEl.style.color = connected ? 'var(--accent2)' : 'var(--danger)';
+}
 
 // ─── State appliers ───────────────────────────────────────────────────────────
 function applyFullState(state) {
   // Pis
   Object.entries(state.pis || {}).forEach(([name, info]) => {
-    updatePiRow(name, info.data);
+    updatePiRow(name, info.data, info.last_seen);
   });
   // DF
   if (state.df && state.df.bearing !== null) {
@@ -504,7 +557,9 @@ function applyFullState(state) {
   // SDR
   updateSDRStatus((state.sdr || {}).devices || {});
   // Alarms
-  (state.alarms || []).forEach(a => addAlarm(a.data));
+  (state.alarms || []).forEach(a => addAlarm(a.data, a.time * 1000));
+  // MQTT broker connection status
+  setMqttStatus(!!state.mqtt_connected);
 }
 
 const PI_MAP = { 'pi1':'pi1','master':'pi1','pi2':'pi2','pi3':'pi3','pi4':'pi4' };
@@ -514,24 +569,49 @@ function piKey(name) {
   return PI_MAP[n] || n;
 }
 
-function updatePiRow(name, data) {
+// last_seen per node, so node health can be re-evaluated on a timer
+// (refreshNodeHealth below) even when no new MQTT traffic arrives - a node
+// that reported once and then went dark must eventually go from green to
+// dead on its own, not stay "healthy" forever because nothing ever told
+// the client otherwise.
+const piLastSeen = {};
+
+function updatePiRow(name, data, lastSeenFromServer) {
   const key  = piKey(name);
   const dot  = document.getElementById(`${key}-dot`);
   const temp = document.getElementById(`${key}-temp`);
   if (!dot) return;
 
-  const now     = Date.now()/1000;
-  const lastSeen = (data && data.last_seen) ? data.last_seen : now;
-  const age     = now - lastSeen;
-  const t       = (data && data.cpu_temp_c) ? data.cpu_temp_c : null;
-
-  dot.className = 'pi-dot ' + (age > 30 ? 'dot-dead' : age > 15 ? 'dot-warn' : 'dot-ok');
+  // lastSeenFromServer is the wrapper-level time.time() the server stamped
+  // when this status arrived (see dashboard_server.py _on_pi_status) - only
+  // fall back to "now" the first time this node is ever seen, when there
+  // is genuinely no other timestamp available.
+  const lastSeen = (lastSeenFromServer !== undefined && lastSeenFromServer !== null)
+                   ? lastSeenFromServer
+                   : (piLastSeen[key] !== undefined ? piLastSeen[key] : Date.now()/1000);
+  piLastSeen[key] = lastSeen;
+  const t = (data && data.cpu_temp_c) ? data.cpu_temp_c : null;
   if (temp) temp.textContent = t ? `${t.toFixed(1)}°C` : '--°C';
 
-  // Pi count
-  const alive = document.querySelectorAll('.dot-ok').length;
+  applyNodeHealthDot(key, dot, lastSeen);
+}
+
+function applyNodeHealthDot(key, dot, lastSeen) {
+  const age = Date.now()/1000 - lastSeen;
+  dot.className = 'pi-dot ' + (age > 30 ? 'dot-dead' : age > 15 ? 'dot-warn' : 'dot-ok');
+  // Scoped to the node-status panel only - SDR device indicators reuse the
+  // same .dot-ok class in a different panel and must not be counted here.
+  const alive = document.querySelectorAll('#pi-body .dot-ok').length;
   document.getElementById('pi-count').textContent = `${alive}/4`;
 }
+
+function refreshNodeHealth() {
+  Object.entries(piLastSeen).forEach(([key, lastSeen]) => {
+    const dot = document.getElementById(`${key}-dot`);
+    if (dot) applyNodeHealthDot(key, dot, lastSeen);
+  });
+}
+setInterval(refreshNodeHealth, 5000);
 
 function updateRX(data) {
   const recording = data.recording || false;
@@ -571,14 +651,43 @@ function updateSDRStatus(devices) {
 }
 
 let alarmCount = 0;
-function addAlarm(data) {
+const seenAlarmKeys = new Set();
+let clearedInitialAlarmPlaceholder = false;
+
+function addAlarm(data, sourceTimeMs) {
+  // Any MQTT publisher can currently put text into an alarm (see
+  // docs/MANUAL.md Part 7.4 on MQTT ACLs/auth) - that text must never
+  // become HTML. Build the row from DOM nodes with textContent, not
+  // innerHTML, so an alarm payload containing markup/script can't execute
+  // in every connected operator's browser.
   const list = document.getElementById('alarm-list');
   const msg  = typeof data === 'string' ? data : (data && data.msg) ? data.msg : JSON.stringify(data);
   const level = (data && data.level) === 'critical' ? 'danger' : 'warn';
-  const ts   = new Date().toISOString().substr(11,8);
+
+  // De-dupe: a reconnect replays state.alarms, which can overlap alarms
+  // already delivered live over the socket before the reconnect completed.
+  const key = `${sourceTimeMs || ''}|${level}|${msg}`;
+  if (seenAlarmKeys.has(key)) return;
+  seenAlarmKeys.add(key);
+
+  if (!clearedInitialAlarmPlaceholder) {
+    list.innerHTML = '';
+    clearedInitialAlarmPlaceholder = true;
+  }
+
+  const ts = new Date(sourceTimeMs || Date.now()).toISOString().substr(11, 8);
   const item = document.createElement('div');
   item.className = 'alarm-item';
-  item.innerHTML = `<span class="alarm-time">${ts}</span> <span class="alarm-msg ${level}">${msg}</span>`;
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'alarm-time';
+  timeSpan.textContent = ts;
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = `alarm-msg ${level}`;
+  msgSpan.textContent = msg;
+
+  item.append(timeSpan, document.createTextNode(' '), msgSpan);
   list.prepend(item);
   alarmCount++;
   const badge = document.getElementById('alarm-count');

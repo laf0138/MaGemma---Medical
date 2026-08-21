@@ -224,7 +224,10 @@ sudo apt update && sudo apt install -y mosquitto mosquitto-clients python3-venv 
 sudo mkdir -p /opt/specter /etc/specter /var/log/specter /var/lib/specter
 sudo cp -r specter/* /opt/specter/
 sudo python3 -m venv /opt/specter/venv
-sudo /opt/specter/venv/bin/pip install paho-mqtt flask flask-socketio eventlet requests numpy
+sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 flask==3.1.3 flask-socketio==5.6.1 eventlet==0.41.2 requests==2.33.1 numpy==2.4.6
+# Pinned to the versions this repo's test suite is actually run against
+# (see requirements-dev.txt) - an unpinned install months from now can
+# pull a materially different, untested version onto a field kit.
 
 # Service user
 sudo useradd -r -s /bin/false -G audio,dialout,plugdev specter 2>/dev/null || true
@@ -333,7 +336,12 @@ ollama pull medgemma:4b
 ollama pull nomic-embed-text
 
 # Python deps
-sudo /opt/specter/venv/bin/pip install paho-mqtt requests chromadb
+sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 requests==2.33.1 chromadb
+# paho-mqtt/requests pinned to the versions this repo's test suite runs
+# against (see requirements-dev.txt). chromadb is left unpinned here
+# deliberately rather than guessing a version - it isn't in
+# requirements-dev.txt and hasn't been exercised by this project's test
+# suite at all, so pin it only after that verification happens.
 
 # Build the RAG index over the PDF corpus
 sudo /opt/specter/venv/bin/python /opt/specter/services/build_index.py \
@@ -371,7 +379,9 @@ wiring one up.
 ```bash
 sudo apt install -y python3-venv bluez
 sudo python3 -m venv /opt/specter/venv
-sudo /opt/specter/venv/bin/pip install paho-mqtt bleak bleakheart neurokit2
+sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 bleak==3.0.2 bleakheart==0.2.0 neurokit2==0.2.13
+# Pinned to the versions this repo's test suite is actually run against
+# (see requirements-dev.txt) - see the note in Part 3.3 on why.
 
 # Only once you've verified a device's parser against real hardware:
 # sudo systemctl edit specter-medical-hub
@@ -710,14 +720,15 @@ journalctl -u specter-thermal -n 100
 
 ## 7.1 Built and tested
 
-- ✅ Trauma module — casualty registry, START triage, tourniquet clocks, staleness alerts, MARCH state machine. Exercised end-to-end over MQTT.
-- ✅ RESUS UI — triage board and MARCH screens with state-driven directive, step gating, obligation timers.
+- ✅ Trauma module — casualty registry, START triage, tourniquet clocks, staleness alerts, MARCH state machine, scene state that survives a service restart (see Part 7.4). Exercised end-to-end over MQTT.
 - ✅ RX ring buffer — pre-trigger capture with the wrap-detection bug fixed.
 - ✅ Installers — hardware probe, package install, service deployment.
 - ✅ MARCH paper card generation.
+- ✅ Dashboard server (`dashboard_server.py`) — MQTT-to-WebSocket relay, `/`, `/resus`, `/api/state`, `/api/status` routes, broker-connection status tracking. See Part 7.4 for the security/XSS/offline fixes this had needed.
 
 ## 7.2 Built, not yet tested against real hardware
 
+- ⚠️ **RESUS UI (`resus.html`)** — the triage board and MARCH screens (state-driven directive, step gating, obligation timers, append-only correction log) are real, tested logic, but run entirely against **locally-generated sample casualties in browser memory**, not the live trauma service. It does not consume `shtf/trauma/#`, so nothing an operator does on this screen reaches the trauma service, MQTT, or any other operator's screen, and refreshing the page discards all of it. A `⚠ DEMO MODE` banner now says this explicitly on the screen itself (August 2026 fix - see Part 7.4) rather than presenting as connected, which it previously did not. Wiring this to the real trauma service (consume `shtf/trauma/scene` for state, publish `shtf/trauma/command/#` for actions) is real, substantial work that has not been done.
 - ⚠️ **Medical hub** — see Part 7.4. All five device types are hard-blocked by default pending real-hardware verification, not merely untested. Contour Next One's parser has a confirmed-correct rewrite awaiting hardware confirmation; Braun ThermoScan 7 as specified has no Bluetooth radio and cannot be fixed at all (see Part 7.4).
 - ⚠️ **Medical AI engine** — logic is sound, but MedGemma output quality on your specific patient profiles is unverified. Run practice queries with known cases before you need it.
 - ⚠️ **Library RAG** — index builder exists; retrieval quality across the PDF corpus is untested.
@@ -757,6 +768,25 @@ journalctl -u specter-thermal -n 100
 - 🔧 **Contour Next One glucose parser — FIXED (August 2026), still gated.** Unlike Omron, this meter genuinely implements the standard Bluetooth SIG **Glucose Service (0x1808) / Glucose Measurement characteristic (0x2A18)** — confirmed via three independent sources ([weliem/blessed-android](https://github.com/weliem/blessed-android), [NightscoutFoundation/xDrip](https://github.com/NightscoutFoundation/xDrip), [Chakib-Temal/Android_BLE_Usb_Sensors](https://github.com/Chakib-Temal/Android_BLE_Usb_Sensors)). `BluetoothDeviceConfig`'s `service_uuid` is now `1808` (was `180a`, the same Device Information mistake as Omron). `parse_contour_glucometer` now decodes the real record: a flags byte (time-offset/glucose-present/units/sensor-status bits), sequence number, 7-byte base time, and an IEEE 11073-20601 **SFLOAT** concentration — ported from xDrip's `GlucoseReadingRx.java`/`BluetoothCHelper.java` (GPLv3) and cross-checked against the Bluetooth SIG GATT Specification Supplement. The SFLOAT decoder (`_decode_sfloat`) returns `None` — dropping the reading rather than fabricating a number — for the spec's reserved sentinel values (NaN/NRes/±INFINITY), so a device-reported sensor error can't silently turn into a plausible-looking glucose value. Unit conversion (device reports either kg/L or mol/L, selected by a flag bit, never mg/dL directly) uses a molar-mass-derived constant (`GLUCOSE_MOLAR_MASS_G_PER_MOL = 180.156`, IUPAC 2021 standard atomic weights) rather than borrowing either of the two slightly different mmol/L↔mg/dL display constants found in xDrip's own codebase, which convert a different unit and don't apply here. **Still in `VERIFIED_DEVICE_TYPES`'s blocked-by-default set** — a correct decoder against a confirmed-standard protocol is lower-risk than the hand-parsed devices above, but "should be right" isn't "hardware confirmed," the same bar `polar_h10` is held to.
 
 - 🔧 **Braun ThermoScan 7 — cannot be fixed as specified; not a parser bug.** Investigated alongside Contour Next One using the same methodology, with a different outcome: the physical device this kit's docs actually name, the plain **"ThermoScan 7" (IRT6520)**, has **no Bluetooth radio at all**. It's a basic ear thermometer — 9-reading on-device memory button, no app, no wireless sync of any kind — confirmed against Braun's own US/UK product pages and multiple independent reviews (August 2026). Braun sells a visually similar but distinct SKU, **"ThermoScan 7+ Connect"** (BLE 5.0, syncs to the Braun Family Care app), which is a different product requiring its own from-scratch protocol verification if the kit's hardware were swapped to it. `braun_thermoscan` stays hard-blocked permanently under the current kit — there is no real GATT traffic to capture from a device that has no radio, so unlike Contour there is no fix to make here in software. If the field kit is meant to include a Bluetooth-connected thermometer, replace the physical unit with the Connect model and treat it as a new, unverified device.
+
+- 🔧 **MQTT 1.x/2.x compatibility fallback recursed instead of falling back — FIXED (August 2026).** `_mqtt_client()` in `specter_trauma.py`, `specter_trauma_monitor.py`, `specter_medical_hub.py`, and `specter_medical_ai.py` caught the `AttributeError` from paho-mqtt 1.x lacking `CallbackAPIVersion` and called *itself* again instead of falling back to the old-style `mqtt.Client(client_id=...)` constructor. Since that `AttributeError` is deterministic — the attribute either exists or it doesn't, unaffected by retrying — every retry hit the identical error, recursing until `RecursionError`, which could prevent the trauma and medical hub/AI services from starting at all on a paho-mqtt 1.x install. All four now fall back correctly; regression tests simulate a 1.x-shaped `paho.mqtt.client` module (`tests/test_mqtt_auth.py::TestMqttClientCompatFallback`) rather than requiring an actual 1.x install.
+
+- 🔧 **Trauma scene "persistence" only ever wrote, never restored — FIXED (August 2026).** `SceneRegistry._persist()` wrote `scene.json` on every mutation, but nothing ever read it back — a service restart (crash, power loss, upgrade) silently discarded the active scene even though the surrounding comments said persistence existed specifically to survive that. It also wrote the file in place, so a crash mid-write could leave a truncated/corrupt `scene.json`. Fixed: `SceneRegistry.__init__` now calls `_restore()`, which reconstructs every casualty (including full vitals history and tourniquet records — the old persisted shape was `scene_summary()`, which only kept the *latest* vitals reading, not the history) from disk. Writes go through a sibling `.tmp` file with `fsync()` then `os.replace()` (atomic on POSIX), plus a best-effort directory-entry `fsync`, so a crash mid-write can never leave `scene.json` corrupted — the file on disk is always either the complete old state or the complete new state. A corrupt or unrecognized-format file logs loudly and starts an empty scene rather than crashing the service or silently guessing at a malformed structure. See `tests/test_trauma.py::TestSceneRegistryPersistence`.
+
+- 🔧 **Dashboard XSS via alarm text, hardcoded secret, wide-open CORS, `/resus` unrouted — FIXED (August 2026).** An external code review of the dashboard/RESUS surface found several real issues, all now fixed:
+  - **innerHTML XSS**: `addAlarm()` in `dashboard.html` built each alarm row with `innerHTML`, interpolating the alarm's `msg` field directly. Any MQTT publisher (see the ACL note in Part 7.2) could put `<img src=x onerror=...>` or similar into an alarm and run arbitrary JavaScript in every connected operator's browser. Now builds the row from DOM nodes with `textContent` — verified with a headless-browser test injecting exactly that payload and confirming no `<img>` tag lands in the DOM and no script runs.
+  - **Hardcoded Flask `SECRET_KEY`**: was a literal string in source, so identical on every install (it's in the git repo) — not a secret. Now read from `specter.json`'s `dashboard.secret_key` if the installer sets one, else a random key generated per process start.
+  - **`cors_allowed_origins="*"`**: let any origin's page drive the dashboard's WebSocket, including `trigger_rx`. Now defaults to flask-socketio's same-origin-only behavior (`None`) unless `specter.json`'s `dashboard.cors_allowed_origins` explicitly configures a trusted list.
+  - **`/resus` route missing**: `docs/SPECTER_MEDICAL_UI_BRIEF.md` and this manual (Part 8) document `http://192.168.1.1:5000/resus`, but `dashboard_server.py` only routed `/`, `/api/state`, `/api/status`. Added.
+  - **Offline dashboard depended on the internet**: `dashboard.html` loaded Socket.IO and D3 from `cdnjs.cloudflare.com` — on a genuinely offline network both `io` and `d3` came back `undefined` and the dashboard's core script failed outright, which is the opposite of what an offline-first emergency dashboard needs. Both are now vendored locally under `dashboard/vendor/` (same exact versions, MIT/ISC licensed) and served by Flask's static route.
+  - **RF waterfall permanently simulated with no indication**: the spectrum panel renders random noise unconditionally — there is no real waterfall MQTT topic, server handler, or SDR pipeline anywhere in this codebase (Node 3/4/6 workloads remain unimplemented, Part 7.3). It now carries a permanent `SIMULATED DATA` badge and watermark rather than looking like live RF telemetry.
+  - **Node health could stay green forever**: the server stamps a wrapper-level `last_seen` on every Pi status update, but it never reached the client (`applyFullState` discarded it; the live push never sent it), and nothing re-evaluated a node's dot color once painted — a Pi that reported once and then went dark stayed "healthy" indefinitely. `last_seen` now travels with both the live push and the full-state snapshot, and a client-side timer re-derives every dot's color every 5s from age, not just on new traffic. The "Pi count" badge was also counting every green dot on the page, including SDR hardware indicators sharing the same CSS class — scoped to the node-status panel only.
+  - **`/api/status` "uptime" was the Unix epoch**: `int(time.time())` reported billions of seconds of uptime. Now `time.time() - START_TIME` (process start).
+  - **Alarm timestamps came from the browser, not the source event; reconnects could duplicate alarms; the initial "No alarms" placeholder never cleared**: the live `alarm` push sent only the raw MQTT payload, dropping the server-side receive timestamp entirely. Alarms now carry `{time, data}` consistently (live push and reconnect replay both), the client de-dupes by that timestamp instead of guessing, and the placeholder text is cleared on first real alarm rather than sitting above the real list forever.
+  - **Version strings frozen at 1.0.0**: `dashboard_server.py`'s `VERSION` is bumped to reflect the fixes in this pass, and the dashboard footer now fetches it from `/api/status` instead of a hardcoded string in the HTML, so it can't drift again silently.
+  - **Unpinned dependencies**: `requirements-dev.txt`, `deploy/install_specter.py`'s `PIP_PACKAGES`, and the `pip install` commands in this manual now pin exact versions for every package this repo's test suite actually exercises, so a field-kit rebuild months from now can't silently pull a materially different, untested version. A few Pi-hardware-only packages (`scipy`, `soundfile`, `pyaudio`, `pyserial`, `gps3`, `matplotlib`) remain unpinned — this project's test suite doesn't exercise them, so guessing a version to pin would be no more trustworthy than leaving them open; pin those once they get their own verification pass.
+
+  **Not fixed in this pass** — flagged, not silently left implied as done: RESUS is still demo-only and not wired to live trauma MQTT state (see the Part 7.2 entry above); the tourniquet-toggle-off inconsistency in RESUS is fixed (un-checking a MARCH step now logs an explicit correction event and marks the open tourniquet record `removed` rather than either leaving it silently ticking or deleting it — append-only, per the review's own recommendation), but RESUS's cards/checklist rows are now keyboard-operable (added `tabindex`/`role="button"`/Enter-Space handling, with focus preserved across the once-a-second redraw) while the "Ask MedGemma"/"Ward"/"Chronic" controls are now explicitly labeled `NOT INSTALLED` rather than looking clickable and doing nothing. Full operator authentication (a real login/session system) for the dashboard and RESUS was not built — that's a genuine new feature, not a fix, and needs its own design pass.
 
 ## 7.5 The binding constraint
 
