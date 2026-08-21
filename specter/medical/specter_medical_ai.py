@@ -254,7 +254,21 @@ class VitalsCache:
         "glucose_mg_dl": "Blood glucose",
         "ecg_rhythm": "ECG rhythm",
         "respiratory_rate": "Respiratory rate",
+        "ecg_qrs_duration_ms": "ECG QRS duration",
+        "ecg_r_wave_amplitude_uv": "ECG R-wave amplitude",
+        "ecg_t_wave_amplitude_uv": "ECG T-wave amplitude",
+        "ecg_t_r_ratio": "ECG T/R amplitude ratio",
+        "ecg_advisory_flags": "ECG advisory flags",
     }
+
+    # Raw sample arrays (a full ECG waveform, a list of RR intervals) are
+    # not useful dumped into a text prompt - hundreds/thousands of bare
+    # numbers waste context and tell MedGemma nothing a text model can act
+    # on. See medical/ecg_analysis.py: the derived scalars (QRS duration,
+    # wave amplitudes, advisory flags) are what belong in the prompt: the
+    # raw waveform is future multimodal-input material, not implemented
+    # here (see docs/MANUAL.md Part 7.4).
+    RAW_ARRAY_READING_TYPES = {"ecg_waveform_uv", "rr_intervals_ms"}
 
     def __init__(self, stale_seconds: int = 600):
         self._lock = threading.Lock()
@@ -316,12 +330,23 @@ class VitalsCache:
         for reading_type, reading in sorted(latest.items()):
             if reading_type == "temperature_f":
                 continue  # avoid duplicate temperature lines; C is canonical
+            if reading_type in self.RAW_ARRAY_READING_TYPES:
+                continue  # raw sample arrays - see RAW_ARRAY_READING_TYPES
             label = self.LABELS.get(reading_type, reading_type)
             age = reading.age_seconds()
             age_txt = f"{int(age)}s ago" if age < 3600 else f"{age / 3600:.1f}h ago"
             stale = age > self.stale_seconds
             stale_any = stale_any or stale
             stale_txt = "  [STALE - may not reflect current state]" if stale else ""
+
+            if reading_type == "ecg_advisory_flags" and isinstance(reading.value, list):
+                if not reading.value:
+                    continue
+                lines.append(f"  - {label} ({age_txt}){stale_txt}:")
+                for flag in reading.value:
+                    lines.append(f"      - {flag}")
+                continue
+
             annotation = self._annotate(reading_type, reading.value)
             trend = self._trend(patient_id, reading_type)
             lines.append(

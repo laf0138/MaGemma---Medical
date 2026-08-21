@@ -96,6 +96,35 @@ class TestHandleVitals:
         })
         assert engine.vitals.latest("operator") == {}
 
+    def test_ecg_analysis_readings_flow_through_to_the_built_prompt(self, engine):
+        # A realistic snapshot payload shaped like what medical_hub.py's
+        # _collect_polar_h10_stream + ecg_analysis.py actually publish -
+        # full round trip: MQTT payload -> VitalsCache -> PromptBuilder.
+        engine._handle_vitals("shtf/medical/vitals/operator", {
+            "readings": [
+                {"reading_type": "ecg_waveform_uv", "value": list(range(500)), "unit": "uV"},
+                {"reading_type": "ecg_qrs_duration_ms", "value": 145.0, "unit": "ms"},
+                {"reading_type": "ecg_t_r_ratio", "value": 0.8, "unit": "ratio"},
+                {
+                    "reading_type": "ecg_advisory_flags",
+                    "value": ["QRS duration 145ms is above the 120ms widened-QRS threshold."],
+                    "unit": "text",
+                },
+            ]
+        })
+
+        prompt = engine.prompts.build(
+            patient_id="operator", user_query="how is the patient doing",
+            passages=[], retriever=engine.retriever,
+        )
+
+        assert "ECG QRS duration: 145.0 ms" in prompt
+        assert "ECG T/R amplitude ratio: 0.8 ratio" in prompt
+        assert "QRS duration 145ms is above the 120ms widened-QRS threshold" in prompt
+        # The raw waveform must never be dumped into the text prompt.
+        assert "ecg_waveform_uv" not in prompt
+        assert str(list(range(500))) not in prompt
+
 
 # ---------------------------------------------------------------------------
 # Profile overrides

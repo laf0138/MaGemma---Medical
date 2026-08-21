@@ -217,6 +217,64 @@ class TestVitalsCachePromptBlock:
         assert "NOT MEASURED" not in block
 
 
+class TestVitalsCacheEcgFields:
+    """The Polar H10 / NeuroKit2 layer (medical/ecg_analysis.py) publishes
+    both raw sample arrays and derived scalar metrics as vitals readings.
+    Only the derived scalars belong in a text prompt - see
+    RAW_ARRAY_READING_TYPES in specter_medical_ai.py."""
+
+    def test_raw_ecg_waveform_is_excluded_from_prompt(self):
+        cache = VitalsCache()
+        cache.update("p1", "ecg_waveform_uv", VitalReading(
+            value=[1, 2, 3, 4, 5], unit="uV", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "ecg_waveform_uv" not in block
+        assert "[1, 2, 3" not in block
+
+    def test_raw_rr_intervals_are_excluded_from_prompt(self):
+        cache = VitalsCache()
+        cache.update("p1", "rr_intervals_ms", VitalReading(
+            value=[810, 795, 820], unit="ms", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "rr_intervals_ms" not in block
+        assert "810" not in block
+
+    def test_derived_qrs_duration_appears_with_label_and_unit(self):
+        cache = VitalsCache()
+        cache.update("p1", "ecg_qrs_duration_ms", VitalReading(
+            value=84.6, unit="ms", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "ECG QRS duration: 84.6 ms" in block
+
+    def test_derived_t_r_ratio_appears(self):
+        cache = VitalsCache()
+        cache.update("p1", "ecg_t_r_ratio", VitalReading(
+            value=0.33, unit="ratio", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "ECG T/R amplitude ratio: 0.33 ratio" in block
+
+    def test_advisory_flags_render_as_individual_lines(self):
+        cache = VitalsCache()
+        cache.update("p1", "ecg_advisory_flags", VitalReading(
+            value=[
+                "QRS duration 145ms is above the 120ms widened-QRS threshold - non-specific.",
+                "T-wave amplitude is 0.80x the R-wave amplitude, above the 0.75x advisory threshold.",
+            ],
+            unit="text", timestamp_utc=iso(),
+        ))
+        block = cache.to_prompt_block("p1")
+        assert "ECG advisory flags" in block
+        assert "QRS duration 145ms is above the 120ms widened-QRS threshold" in block
+        assert "T-wave amplitude is 0.80x the R-wave amplitude" in block
+
+    def test_empty_advisory_flags_list_produces_no_output(self):
+        cache = VitalsCache()
+        cache.update("p1", "ecg_advisory_flags", VitalReading(
+            value=[], unit="text", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "ECG advisory flags" not in block
+
+
 # ---------------------------------------------------------------------------
 # GuidelineRetriever.to_prompt_block / kiwix_search_url (pure formatting,
 # no ChromaDB required - constructor degrades gracefully when it's absent)
