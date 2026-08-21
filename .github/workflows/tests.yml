@@ -19,5 +19,31 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run tests
-        run: pytest -v
+      - name: Run tests with coverage
+        run: |
+          pytest -v --cov=specter --cov-report=term-missing --cov-report=xml
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          echo "## Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # No --cov-fail-under yet: several modules (the systemd service
+          # wrappers - core/mqtt_coordinator.py, core/sdr_control.py,
+          # core/thermal_monitor.py, trauma/specter_trauma_monitor.py,
+          # services/specter_rx_ring_buffer.py) sit at 26-39% because their
+          # blocking run()/main() loops and hardware interaction aren't
+          # covered yet - see docs/MANUAL.md Part 7.2. A threshold set to
+          # today's ~63% overall would lock in that gap as acceptable; set
+          # too high, it fails CI on every commit until someone does that
+          # work. Enforce one once those modules have their own coverage
+          # pass, not before.
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
