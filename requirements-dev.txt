@@ -1,3 +1,4 @@
 paho-mqtt
 bleak
+numpy
 pytest
