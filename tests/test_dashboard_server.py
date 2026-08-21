@@ -278,23 +278,74 @@ def client():
     return ds.app.test_client()
 
 
-class TestHttpRoutes:
-    def test_index_serves_dashboard_html(self, client):
+@pytest.fixture
+def auth():
+    """Basic Auth kwarg for the Flask test client, matching the real
+    default credential (see TestDashboardAuth for the gate itself)."""
+    return (ds.DASHBOARD_AUTH_USERNAME, ds.DASHBOARD_AUTH_PASSWORD)
+
+
+class TestDashboardAuth:
+    """
+    HTTP Basic Auth on every route but /api/status - closes the gap where
+    same-origin CORS/no-anonymous-MQTT stopped a page on another origin or
+    host, but not a person already on the LAN pointing a browser straight
+    at port 5000, who could otherwise read /api/state and invoke
+    trigger_rx with nothing else required.
+    """
+
+    def test_index_rejects_no_credentials(self, client):
         resp = client.get("/")
+        assert resp.status_code == 401
+        assert "WWW-Authenticate" in resp.headers
+
+    def test_index_rejects_wrong_credentials(self, client):
+        resp = client.get("/", auth=(ds.DASHBOARD_AUTH_USERNAME, "wrong"))
+        assert resp.status_code == 401
+
+    def test_index_accepts_correct_credentials(self, client, auth):
+        resp = client.get("/", auth=auth)
         assert resp.status_code == 200
 
-    def test_resus_route_serves_resus_html(self, client):
+    def test_api_state_requires_auth(self, client, auth):
+        assert client.get("/api/state").status_code == 401
+        assert client.get("/api/state", auth=auth).status_code == 200
+
+    def test_resus_requires_auth(self, client, auth):
+        assert client.get("/resus").status_code == 401
+        assert client.get("/resus", auth=auth).status_code == 200
+
+    def test_api_status_is_the_deliberate_unauthenticated_exception(self, client):
+        # scripts/health_check.sh polls this without credentials, the same
+        # way a load balancer health check normally would - it carries no
+        # patient or system state, just service/version/uptime/ok.
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+
+    def test_default_password_triggers_startup_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="specter.dashboard"):
+            ds._dashboard_auth_credentials()
+        assert any("DEFAULT operator password" in r.message for r in caplog.records)
+
+
+class TestHttpRoutes:
+    def test_index_serves_dashboard_html(self, client, auth):
+        resp = client.get("/", auth=auth)
+        assert resp.status_code == 200
+
+    def test_resus_route_serves_resus_html(self, client, auth):
         # docs/SPECTER_MEDICAL_UI_BRIEF.md and the trauma docs both point
         # operators at /resus, but only "/", "/api/state", "/api/status"
         # were ever routed - the file was only reachable (if at all) via
         # Flask's static handler at a different, undocumented URL.
-        resp = client.get("/resus")
+        resp = client.get("/resus", auth=auth)
         assert resp.status_code == 200
         assert b"<html" in resp.data.lower()
 
-    def test_api_state_returns_current_state(self, client):
+    def test_api_state_returns_current_state(self, client, auth):
         ds.STATE["tx"]["status"] = "idle-test-marker"
-        resp = client.get("/api/state")
+        resp = client.get("/api/state", auth=auth)
         assert resp.status_code == 200
         assert resp.get_json()["tx"]["status"] == "idle-test-marker"
 

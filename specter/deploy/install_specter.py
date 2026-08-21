@@ -655,6 +655,15 @@ def write_configs(report: InstallReport) -> None:
             "host": "0.0.0.0",
             "port": 5000,
             "update_interval_ms": 250,
+            # HTTP Basic Auth for the dashboard/RESUS/WARD web UI - see
+            # dashboard_server.py's DASHBOARD_AUTH_* constants. Deliberately
+            # a SEPARATE credential from any MQTT account (same derivation
+            # mechanism, different label) so rotating the UI login doesn't
+            # force rotating a broker account and vice versa.
+            "auth": {
+                "username": "operator",
+                "password": _derive_service_password(MQTT_PASSWORD, "dashboard_http"),
+            },
         },
         "thermal": {
             "idle_max_c": 45,

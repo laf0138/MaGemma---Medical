@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -23,13 +24,25 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, Response
 from flask_socketio import SocketIO, emit
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
 DASHBOARD_DIR = Path(__file__).parent
 VERSION = "1.1.0"
 START_TIME = time.time()
+
+# Same-origin CORS and no anonymous MQTT stop a page on another origin or
+# host from driving this dashboard, but neither one authenticates a person
+# who is already on the LAN and points a browser straight at port 5000 -
+# that person could read /api/state (every casualty/patient reading that
+# has ever crossed MQTT) and invoke trigger_rx with nothing else required.
+# HTTP Basic Auth closes that gap. /api/status is the one deliberate
+# exception - a bare liveness probe (service/version/uptime/ok, no patient
+# or system state) that scripts/health_check.sh polls unauthenticated, the
+# same way a load balancer health check normally would.
+DASHBOARD_AUTH_DEFAULT_USERNAME = "operator"
+DASHBOARD_AUTH_DEFAULT_PASSWORD = "specter-change-me"
 
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "dashboard"
@@ -59,6 +72,47 @@ def load_config() -> dict:
         }
 
 cfg = load_config()
+
+
+def _dashboard_auth_credentials() -> tuple:
+    """Operator login for the dashboard/RESUS/WARD web UI - a separate
+    credential from any MQTT account, so rotating one doesn't force
+    rotating the other. Read from specter.json's dashboard.auth block
+    (written by the installer); falls back to the documented default with
+    a loud startup warning, same pattern as the MQTT default-password
+    check in deploy/install_specter.py."""
+    auth_cfg = cfg.get("dashboard", {}).get("auth", {})
+    username = auth_cfg.get("username", DASHBOARD_AUTH_DEFAULT_USERNAME)
+    password = auth_cfg.get("password", DASHBOARD_AUTH_DEFAULT_PASSWORD)
+    if password == DASHBOARD_AUTH_DEFAULT_PASSWORD:
+        log.warning(
+            "Dashboard is using the DEFAULT operator password - this is "
+            "public (it's in the git repo), so it authenticates no one. "
+            "Set dashboard.auth.password in specter.json before relying "
+            "on this for anything but a bench bring-up."
+        )
+    return username, password
+
+
+DASHBOARD_AUTH_USERNAME, DASHBOARD_AUTH_PASSWORD = _dashboard_auth_credentials()
+
+
+def _check_auth(username: str, password: str) -> bool:
+    # compare_digest avoids leaking password length/prefix through
+    # response-time differences - a plain == here would be a real (if
+    # minor) timing side-channel on a LAN.
+    return (
+        hmac.compare_digest(username, DASHBOARD_AUTH_USERNAME)
+        and hmac.compare_digest(password, DASHBOARD_AUTH_PASSWORD)
+    )
+
+
+def _unauthorized() -> Response:
+    return Response(
+        "Authentication required.", 401,
+        {"WWW-Authenticate": 'Basic realm="SPECTER Dashboard"'},
+    )
+
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -100,6 +154,20 @@ socketio = SocketIO(
 )
 
 
+@app.before_request
+def _require_auth():
+    # /api/status is the one deliberate exception - see the constant block
+    # above for why. Everything else (the dashboard/RESUS/WARD pages,
+    # /api/state, and the vendored JS assets under /dashboard/vendor/)
+    # requires the operator credential.
+    if request.path == "/api/status":
+        return None
+    auth = request.authorization
+    if not auth or not _check_auth(auth.username or "", auth.password or ""):
+        return _unauthorized()
+    return None
+
+
 @app.route("/")
 def index():
     html_path = DASHBOARD_DIR / "dashboard.html"
@@ -134,9 +202,18 @@ def api_status():
 
 @socketio.on("connect")
 def on_connect():
+    # The Socket.IO handshake is a normal HTTP request before it upgrades,
+    # so the same Basic Auth header check applies here - without this, a
+    # client could skip the (now-gated) HTTP page entirely and connect the
+    # WebSocket directly to read live state and call trigger_rx.
+    auth = request.authorization
+    if not auth or not _check_auth(auth.username or "", auth.password or ""):
+        log.warning("Rejected unauthenticated WebSocket connect attempt")
+        return False
     log.info("WebSocket client connected")
     with STATE_LOCK:
         emit("state", dict(STATE))
+    return None
 
 
 @socketio.on("trigger_rx")
