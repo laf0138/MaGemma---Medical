@@ -1,0 +1,18 @@
+        [Unit]
+        Description=SPECTER Medical Hub (Bluetooth vitals aggregator)
+        After=network.target bluetooth.service
+
+        [Service]
+        Type=simple
+        User=specter
+        WorkingDirectory=/opt/specter
+        ExecStart=/opt/specter/venv/bin/python /opt/specter/medical/specter_medical_hub.py --mqtt-host 192.168.1.1 --cycle-interval 60
+        Restart=always
+        RestartSec=10
+        Group=bluetooth
+StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=specter-medical-hub
+
+        [Install]
+        WantedBy=multi-user.target

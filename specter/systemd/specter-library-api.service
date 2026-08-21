@@ -1,0 +1,17 @@
+[Unit]
+Description=SPECTER Library RAG API
+After=network.target specter-ollama.service specter-kiwix.service
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/services/library_api.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-library-api
+
+[Install]
+WantedBy=multi-user.target

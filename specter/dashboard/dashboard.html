@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPECTER — Command Center</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+  :root {
+    --bg:        #050a0f;
+    --panel:     rgba(10,20,30,0.85);
+    --border:    rgba(0,200,255,0.18);
+    --accent:    #00c8ff;
+    --accent2:   #00ff9d;
+    --warn:      #ffaa00;
+    --danger:    #ff3340;
+    --text:      #c8e0f0;
+    --dim:       #4a6070;
+    --glass:     rgba(0,200,255,0.06);
+    --font:      'Courier New', monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: 48px 1fr 36px;
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Header ── */
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    background: rgba(0,10,20,0.95);
+    border-bottom: 1px solid var(--border);
+  }
+  #header .logo { color: var(--accent); font-size: 18px; font-weight: bold; letter-spacing: 6px; }
+  #header .tagline { color: var(--dim); font-size: 10px; letter-spacing: 2px; }
+  #clock { color: var(--accent2); font-size: 14px; letter-spacing: 2px; }
+  #conn-status { font-size: 11px; padding: 3px 8px; border-radius: 3px; }
+  #conn-status.connected    { color: var(--accent2); border: 1px solid var(--accent2); }
+  #conn-status.disconnected { color: var(--danger);  border: 1px solid var(--danger); }
+
+  /* ── Main grid ── */
+  #main {
+    display: grid;
+    grid-template-columns: 260px 1fr 220px;
+    grid-template-rows: 1fr 1fr;
+    gap: 6px;
+    padding: 6px;
+    overflow: hidden;
+  }
+
+  /* ── Panels ── */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    backdrop-filter: blur(4px);
+  }
+  .panel-title {
+    background: var(--glass);
+    border-bottom: 1px solid var(--border);
+    padding: 5px 10px;
+    color: var(--accent);
+    font-size: 10px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+    min-height: 32px;
+  }
+  .panel-title .badge {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 2px;
+    letter-spacing: 1px;
+  }
+  .badge-ok      { background: rgba(0,255,157,0.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .badge-warn    { background: rgba(255,170,0,0.15);  color: var(--warn);   border: 1px solid var(--warn); }
+  .badge-danger  { background: rgba(255,51,64,0.15);  color: var(--danger); border: 1px solid var(--danger); }
+  .badge-dim     { background: rgba(74,96,112,0.15);  color: var(--dim);    border: 1px solid var(--dim); }
+  .panel-body { flex: 1; overflow: hidden; position: relative; padding: 8px; }
+
+  /* ── Left column: Pi status + SDR inventory ── */
+  #panel-pis    { grid-column:1; grid-row:1; }
+  #panel-sdr    { grid-column:1; grid-row:2; }
+
+  /* ── Center: DF compass + waterfall ── */
+  #panel-df       { grid-column:2; grid-row:1; }
+  #panel-waterfall{ grid-column:2; grid-row:2; }
+
+  /* ── Right: RX / TX / Alarms ── */
+  #panel-rx     { grid-column:3; grid-row:1; }
+  #panel-alarms { grid-column:3; grid-row:2; }
+
+  /* ── Pi status rows ── */
+  .pi-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 5px 0; border-bottom: 1px solid rgba(0,200,255,0.07);
+    min-height: 32px;
+  }
+  .pi-name  { color: var(--accent); font-size: 11px; }
+  .pi-role  { color: var(--dim);    font-size: 10px; }
+  .pi-temp  { color: var(--text);   font-size: 11px; }
+  .pi-dot   { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .dot-ok   { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+  .dot-warn { background: var(--warn);    box-shadow: 0 0 6px var(--warn); }
+  .dot-dead { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+  .dot-dim  { background: var(--dim); }
+
+  /* ── SDR device list ── */
+  .sdr-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 5px 0; border-bottom: 1px solid rgba(0,200,255,0.07);
+    min-height: 28px;
+  }
+  .sdr-name { color: var(--text); font-size: 11px; }
+  .sdr-freq { color: var(--dim);  font-size: 10px; }
+
+  /* ── DF Compass ── */
+  #df-canvas-wrap {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100%;
+  }
+  #df-svg { flex-shrink: 0; }
+  #df-bearing-readout {
+    margin-top: 8px;
+    font-size: 32px;
+    color: var(--accent);
+    letter-spacing: 4px;
+    text-shadow: 0 0 12px var(--accent);
+  }
+  #df-confidence {
+    font-size: 11px; color: var(--dim); letter-spacing: 2px;
+  }
+
+  /* ── Waterfall ── */
+  #waterfall-canvas { width: 100%; height: 100%; display: block; }
+
+  /* ── RX Panel ── */
+  .rx-stat { padding: 6px 0; border-bottom: 1px solid rgba(0,200,255,0.07); }
+  .rx-label { color: var(--dim); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; }
+  .rx-value { color: var(--text); font-size: 12px; margin-top: 2px; word-break: break-all; }
+  .rx-value.active { color: var(--accent2); text-shadow: 0 0 8px var(--accent2); }
+  #btn-rx-trigger {
+    margin-top: 10px; width: 100%; padding: 8px 0;
+    background: rgba(0,200,255,0.1); border: 1px solid var(--accent);
+    color: var(--accent); font-family: var(--font); font-size: 11px;
+    letter-spacing: 3px; cursor: pointer; border-radius: 3px;
+    min-height: 36px;
+    transition: background 0.15s;
+  }
+  #btn-rx-trigger:hover { background: rgba(0,200,255,0.2); }
+  #btn-rx-trigger:active { background: rgba(0,200,255,0.35); }
+
+  /* ── Alarms ── */
+  #alarm-list {
+    height: 100%; overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .alarm-item {
+    padding: 5px 6px; border-bottom: 1px solid rgba(255,51,64,0.1);
+    font-size: 10px; line-height: 1.4;
+  }
+  .alarm-time  { color: var(--dim); }
+  .alarm-msg   { color: var(--danger); }
+  .alarm-msg.warn { color: var(--warn); }
+
+  /* ── Footer ── */
+  #footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px;
+    background: rgba(0,10,20,0.95);
+    border-top: 1px solid var(--border);
+    font-size: 10px; color: var(--dim);
+  }
+  #footer span { letter-spacing: 1px; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div id="header">
+  <div>
+    <div class="logo">◈ SPECTER</div>
+    <div class="tagline">EMERGENCY COMMUNICATIONS COMMAND CENTER</div>
+  </div>
+  <div id="clock">--:--:-- UTC</div>
+  <div id="conn-status" class="disconnected">OFFLINE</div>
+</div>
+
+<!-- ── Main ── -->
+<div id="main">
+
+  <!-- Pi Status -->
+  <div class="panel" id="panel-pis">
+    <div class="panel-title">NODE STATUS <span class="badge badge-dim" id="pi-count">0/4</span></div>
+    <div class="panel-body" id="pi-body">
+      <div class="pi-row">
+        <div><div class="pi-name">Pi-1 MASTER</div><div class="pi-role">MQTT · Dashboard</div></div>
+        <div class="pi-temp" id="pi1-temp">--°C</div>
+        <div class="pi-dot dot-dim" id="pi1-dot"></div>
+      </div>
+      <div class="pi-row">
+        <div><div class="pi-name">Pi-2 TX/RX</div><div class="pi-role">HackRF · Pluto</div></div>
+        <div class="pi-temp" id="pi2-temp">--°C</div>
+        <div class="pi-dot dot-dim" id="pi2-dot"></div>
+      </div>
+      <div class="pi-row">
+        <div><div class="pi-name">Pi-3 DF</div><div class="pi-role">KrakenSDR</div></div>
+        <div class="pi-temp" id="pi3-temp">--°C</div>
+        <div class="pi-dot dot-dim" id="pi3-dot"></div>
+      </div>
+      <div class="pi-row">
+        <div><div class="pi-name">Pi-4 RADAR</div><div class="pi-role">Passive Radar</div></div>
+        <div class="pi-temp" id="pi4-temp">--°C</div>
+        <div class="pi-dot dot-dim" id="pi4-dot"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SDR Inventory -->
+  <div class="panel" id="panel-sdr">
+    <div class="panel-title">SDR HARDWARE</div>
+    <div class="panel-body">
+      <div class="sdr-row">
+        <div><div class="sdr-name">HackRF One</div><div class="sdr-freq">HF–6 GHz  TX/RX</div></div>
+        <div class="pi-dot dot-dim" id="sdr-hackrf"></div>
+      </div>
+      <div class="sdr-row">
+        <div><div class="sdr-name">PlutoSDR</div><div class="sdr-freq">70 MHz–6 GHz</div></div>
+        <div class="pi-dot dot-dim" id="sdr-pluto"></div>
+      </div>
+      <div class="sdr-row">
+        <div><div class="sdr-name">KrakenSDR</div><div class="sdr-freq">5-ch coherent DF</div></div>
+        <div class="pi-dot dot-dim" id="sdr-kraken"></div>
+      </div>
+      <div class="sdr-row">
+        <div><div class="sdr-name">RTL-SDR v4</div><div class="sdr-freq">General monitor</div></div>
+        <div class="pi-dot dot-dim" id="sdr-rtlsdr"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DF Compass -->
+  <div class="panel" id="panel-df">
+    <div class="panel-title">DIRECTION FINDING <span class="badge badge-dim" id="df-badge">NO DATA</span></div>
+    <div class="panel-body">
+      <div id="df-canvas-wrap">
+        <svg id="df-svg" width="200" height="200" viewBox="-100 -100 200 200"></svg>
+        <div id="df-bearing-readout">---°</div>
+        <div id="df-confidence">CONFIDENCE: ---%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Waterfall -->
+  <div class="panel" id="panel-waterfall">
+    <div class="panel-title">SPECTRUM / WATERFALL</div>
+    <div class="panel-body" style="padding:0;">
+      <canvas id="waterfall-canvas"></canvas>
+    </div>
+  </div>
+
+  <!-- RX Buffer -->
+  <div class="panel" id="panel-rx">
+    <div class="panel-title">RX CAPTURE <span class="badge badge-dim" id="rx-badge">ARMED</span></div>
+    <div class="panel-body">
+      <div class="rx-stat">
+        <div class="rx-label">Status</div>
+        <div class="rx-value" id="rx-status">MONITORING</div>
+      </div>
+      <div class="rx-stat">
+        <div class="rx-label">Captures</div>
+        <div class="rx-value" id="rx-count">0</div>
+      </div>
+      <div class="rx-stat">
+        <div class="rx-label">Last Trigger</div>
+        <div class="rx-value" id="rx-trigger">—</div>
+      </div>
+      <div class="rx-stat">
+        <div class="rx-label">Last File</div>
+        <div class="rx-value" id="rx-file" style="font-size:10px;">—</div>
+      </div>
+      <button id="btn-rx-trigger" onclick="triggerRX()">⬤ MANUAL CAPTURE</button>
+    </div>
+  </div>
+
+  <!-- Alarms -->
+  <div class="panel" id="panel-alarms">
+    <div class="panel-title">ALARMS <span class="badge badge-dim" id="alarm-count">0</span></div>
+    <div class="panel-body" style="padding:0 4px;">
+      <div id="alarm-list"><div style="color:var(--dim);padding:8px;font-size:11px;">No alarms</div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Footer ── -->
+<div id="footer">
+  <span>SPECTER v1.0.0 — 192.168.1.x PoE MESH</span>
+  <span id="mqtt-status">MQTT: —</span>
+  <span id="uptime-display">UP: 00:00:00</span>
+</div>
+
+<script>
+// ─── DF Compass (D3) ──────────────────────────────────────────────────────────
+const dfSvg = d3.select('#df-svg');
+const R = 90;
+
+// Outer ring
+dfSvg.append('circle').attr('r', R).attr('fill','none')
+  .attr('stroke','rgba(0,200,255,0.25)').attr('stroke-width',1);
+dfSvg.append('circle').attr('r', R*0.7).attr('fill','none')
+  .attr('stroke','rgba(0,200,255,0.1)').attr('stroke-width',1);
+
+// Cardinal labels
+['N','E','S','W'].forEach((c,i) => {
+  const a = i * 90 * Math.PI/180;
+  const r = R + 10;
+  dfSvg.append('text')
+    .attr('x', Math.sin(a)*r).attr('y', -Math.cos(a)*r + 4)
+    .attr('text-anchor','middle').attr('fill','rgba(0,200,255,0.6)')
+    .attr('font-family','Courier New').attr('font-size','11px').text(c);
+});
+
+// Tick marks
+for(let i=0;i<36;i++){
+  const a = i*10*Math.PI/180;
+  const inner = i%9===0 ? R*0.75 : R*0.85;
+  dfSvg.append('line')
+    .attr('x1',Math.sin(a)*inner).attr('y1',-Math.cos(a)*inner)
+    .attr('x2',Math.sin(a)*R).attr('y2',-Math.cos(a)*R)
+    .attr('stroke','rgba(0,200,255,0.3)').attr('stroke-width', i%9===0?1.5:0.5);
+}
+
+// Bearing needle
+const needle = dfSvg.append('g');
+needle.append('line').attr('id','needle-line')
+  .attr('x1',0).attr('y1',0).attr('x2',0).attr('y2',-(R*0.85))
+  .attr('stroke','#00c8ff').attr('stroke-width',2.5)
+  .attr('stroke-linecap','round');
+needle.append('polygon')
+  .attr('id','needle-head')
+  .attr('points','0,-88 -5,-70 5,-70')
+  .attr('fill','#00c8ff');
+needle.append('circle').attr('r',5)
+  .attr('fill','rgba(0,200,255,0.3)').attr('stroke','#00c8ff').attr('stroke-width',1);
+
+let currentBearing = null;
+
+function setBearing(deg, confidence) {
+  if (deg === null || deg === undefined) return;
+  currentBearing = deg;
+  needle.attr('transform', `rotate(${deg})`);
+  document.getElementById('df-bearing-readout').textContent = `${Math.round(deg).toString().padStart(3,'0')}°`;
+  document.getElementById('df-confidence').textContent = `CONFIDENCE: ${Math.round(confidence||0)}%`;
+  const badge = document.getElementById('df-badge');
+  badge.textContent = `${Math.round(deg)}°`;
+  badge.className = 'badge badge-ok';
+}
+
+// ─── Waterfall ────────────────────────────────────────────────────────────────
+const wfCanvas = document.getElementById('waterfall-canvas');
+const wfCtx    = wfCanvas.getContext('2d');
+let wfRows     = [];
+const MAX_ROWS = 200;
+
+function resizeWaterfall() {
+  const parent = wfCanvas.parentElement;
+  wfCanvas.width  = parent.clientWidth;
+  wfCanvas.height = parent.clientHeight;
+}
+window.addEventListener('resize', resizeWaterfall);
+setTimeout(resizeWaterfall, 100);
+
+function pushWaterfallRow(magnitudes) {
+  wfRows.push(magnitudes);
+  if (wfRows.length > MAX_ROWS) wfRows.shift();
+  drawWaterfall();
+}
+
+function drawWaterfall() {
+  const W = wfCanvas.width, H = wfCanvas.height;
+  if (!W || !H) return;
+  wfCtx.fillStyle = '#020810';
+  wfCtx.fillRect(0, 0, W, H);
+  const rowH = H / Math.min(wfRows.length, MAX_ROWS);
+  wfRows.forEach((row, i) => {
+    if (!row || !row.length) return;
+    const y = i * rowH;
+    const cellW = W / row.length;
+    row.forEach((val, j) => {
+      const norm = Math.min(1, Math.max(0, (val + 90) / 90));
+      wfCtx.fillStyle = spectralColor(norm);
+      wfCtx.fillRect(j * cellW, y, cellW + 1, rowH + 1);
+    });
+  });
+}
+
+function spectralColor(t) {
+  if (t < 0.25) return `rgb(0,0,${Math.round(t*4*128)})`;
+  if (t < 0.5)  return `rgb(0,${Math.round((t-0.25)*4*255)},${Math.round(128-(t-0.25)*4*128)})`;
+  if (t < 0.75) return `rgb(${Math.round((t-0.5)*4*255)},255,0)`;
+  return `rgb(255,${Math.round(255-(t-0.75)*4*255)},0)`;
+}
+
+// Demo waterfall (replaced by real MQTT data when available)
+function fakeWaterfallTick() {
+  const cols = 128;
+  const row = Array.from({length:cols}, (_,i) => {
+    const base = -80;
+    const noise = (Math.random()-0.5)*10;
+    const signal = (i > 55 && i < 65) ? 30*Math.random() : 0;
+    return base + noise + signal;
+  });
+  pushWaterfallRow(row);
+}
+setInterval(fakeWaterfallTick, 500);
+
+// ─── Clock ────────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  const hh = now.getUTCHours().toString().padStart(2,'0');
+  const mm = now.getUTCMinutes().toString().padStart(2,'0');
+  const ss = now.getUTCSeconds().toString().padStart(2,'0');
+  document.getElementById('clock').textContent = `${hh}:${mm}:${ss} UTC`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ─── Socket.IO ────────────────────────────────────────────────────────────────
+const socket = io();
+const connEl  = document.getElementById('conn-status');
+const mqttEl  = document.getElementById('mqtt-status');
+
+socket.on('connect', () => {
+  connEl.textContent = 'ONLINE';
+  connEl.className = 'connected';
+});
+socket.on('disconnect', () => {
+  connEl.textContent = 'OFFLINE';
+  connEl.className = 'disconnected';
+});
+
+socket.on('state', (state) => {
+  applyFullState(state);
+});
+
+socket.on('pi_status', (data) => {
+  updatePiRow(data.pi, data.data);
+});
+
+socket.on('df_update', (data) => {
+  setBearing(data.bearing, data.confidence);
+});
+
+socket.on('rx_status', (data) => {
+  updateRX(data);
+});
+socket.on('rx_recording', (data) => {
+  setRXRecording(data.active);
+});
+socket.on('rx_event', (data) => {
+  document.getElementById('rx-file').textContent = data.file || '—';
+  document.getElementById('rx-trigger').textContent = data.reason || '—';
+});
+
+socket.on('sdr_status', (data) => {
+  updateSDRStatus(data.devices || {});
+});
+
+socket.on('alarm', (data) => {
+  addAlarm(data);
+});
+
+// ─── State appliers ───────────────────────────────────────────────────────────
+function applyFullState(state) {
+  // Pis
+  Object.entries(state.pis || {}).forEach(([name, info]) => {
+    updatePiRow(name, info.data);
+  });
+  // DF
+  if (state.df && state.df.bearing !== null) {
+    setBearing(state.df.bearing, state.df.confidence);
+  }
+  // RX
+  updateRX(state.rx || {});
+  // SDR
+  updateSDRStatus((state.sdr || {}).devices || {});
+  // Alarms
+  (state.alarms || []).forEach(a => addAlarm(a.data));
+}
+
+const PI_MAP = { 'pi1':'pi1','master':'pi1','pi2':'pi2','pi3':'pi3','pi4':'pi4' };
+
+function piKey(name) {
+  const n = (name || '').toLowerCase().replace(/[^a-z0-9]/g,'');
+  return PI_MAP[n] || n;
+}
+
+function updatePiRow(name, data) {
+  const key  = piKey(name);
+  const dot  = document.getElementById(`${key}-dot`);
+  const temp = document.getElementById(`${key}-temp`);
+  if (!dot) return;
+
+  const now     = Date.now()/1000;
+  const lastSeen = (data && data.last_seen) ? data.last_seen : now;
+  const age     = now - lastSeen;
+  const t       = (data && data.cpu_temp_c) ? data.cpu_temp_c : null;
+
+  dot.className = 'pi-dot ' + (age > 30 ? 'dot-dead' : age > 15 ? 'dot-warn' : 'dot-ok');
+  if (temp) temp.textContent = t ? `${t.toFixed(1)}°C` : '--°C';
+
+  // Pi count
+  const alive = document.querySelectorAll('.dot-ok').length;
+  document.getElementById('pi-count').textContent = `${alive}/4`;
+}
+
+function updateRX(data) {
+  const recording = data.recording || false;
+  setRXRecording(recording);
+  document.getElementById('rx-count').textContent   = data.capture_count || 0;
+  document.getElementById('rx-trigger').textContent  = data.last_trigger  || '—';
+  document.getElementById('rx-file').textContent     = data.last_file     || '—';
+}
+
+function setRXRecording(active) {
+  const el    = document.getElementById('rx-status');
+  const badge = document.getElementById('rx-badge');
+  if (active) {
+    el.textContent = '● RECORDING';
+    el.className   = 'rx-value active';
+    badge.textContent = 'REC';
+    badge.className   = 'badge badge-danger';
+  } else {
+    el.textContent = 'MONITORING';
+    el.className   = 'rx-value';
+    badge.textContent = 'ARMED';
+    badge.className   = 'badge badge-ok';
+  }
+}
+
+const SDR_IDS = { hackrf:'sdr-hackrf', plutosdr:'sdr-pluto', pluto:'sdr-pluto',
+                  kraken:'sdr-kraken', rtlsdr:'sdr-rtlsdr' };
+
+function updateSDRStatus(devices) {
+  Object.entries(devices).forEach(([name, info]) => {
+    const id  = SDR_IDS[name.toLowerCase()] || `sdr-${name.toLowerCase()}`;
+    const dot = document.getElementById(id);
+    if (dot) {
+      dot.className = 'pi-dot ' + (info.present ? 'dot-ok' : 'dot-dead');
+    }
+  });
+}
+
+let alarmCount = 0;
+function addAlarm(data) {
+  const list = document.getElementById('alarm-list');
+  const msg  = typeof data === 'string' ? data : (data && data.msg) ? data.msg : JSON.stringify(data);
+  const level = (data && data.level) === 'critical' ? 'danger' : 'warn';
+  const ts   = new Date().toISOString().substr(11,8);
+  const item = document.createElement('div');
+  item.className = 'alarm-item';
+  item.innerHTML = `<span class="alarm-time">${ts}</span> <span class="alarm-msg ${level}">${msg}</span>`;
+  list.prepend(item);
+  alarmCount++;
+  const badge = document.getElementById('alarm-count');
+  badge.textContent = alarmCount;
+  badge.className   = alarmCount > 0 ? 'badge badge-danger' : 'badge badge-dim';
+  // Trim to 50
+  while (list.children.length > 50) list.removeChild(list.lastChild);
+}
+
+// ─── Manual RX trigger ────────────────────────────────────────────────────────
+function triggerRX() {
+  socket.emit('trigger_rx');
+  const btn = document.getElementById('btn-rx-trigger');
+  btn.textContent = '⬤ TRIGGERED';
+  btn.style.color = '#00ff9d';
+  setTimeout(() => {
+    btn.textContent = '⬤ MANUAL CAPTURE';
+    btn.style.color = '';
+  }, 2000);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+        [Unit]
+        Description=SPECTER SDR Control Service
+        After=network.target specter-mqtt.service
+
+        [Service]
+        Type=simple
+        User=specter
+        WorkingDirectory=/opt/specter
+        ExecStart=/opt/specter/venv/bin/python /opt/specter/core/sdr_control.py
+        Restart=always
+        RestartSec=5
+        Group=plugdev
+StandardOutput=journal
+        StandardError=journal
+        SyslogIdentifier=specter-sdr
+
+        [Install]
+        WantedBy=multi-user.target
