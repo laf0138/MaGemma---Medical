@@ -251,6 +251,37 @@ class TestOnWardAlert:
         assert ds.STATE["alarms"] == []
 
 
+class TestOnMeshStatus:
+    def test_dict_payload_updates_status_and_stamps_updated(self, mqtt):
+        mqtt._on_mesh_status("shtf/mesh/status", {"state": "connected", "timestamp_utc": "x"})
+        assert ds.STATE["mesh"]["status"] == "connected"
+        assert ds.STATE["mesh"]["updated"] > 0
+        assert mqtt.pushed == [("mesh_status", ds.STATE["mesh"])]
+
+    def test_non_dict_payload_leaves_state_untouched(self, mqtt):
+        before = dict(ds.STATE["mesh"])
+        mqtt._on_mesh_status("shtf/mesh/status", "garbage")
+        assert ds.STATE["mesh"]["status"] == before["status"]
+
+
+class TestOnMeshInbound:
+    def test_dict_payload_appended_and_pushed(self, mqtt):
+        entry = {"from": "!abc123", "text": "copy that", "timestamp_utc": "x"}
+        mqtt._on_mesh_inbound("shtf/mesh/inbound", entry)
+        assert ds.STATE["mesh"]["messages"] == [entry]
+        assert mqtt.pushed == [("mesh_message", entry)]
+
+    def test_non_dict_payload_does_not_raise(self, mqtt):
+        mqtt._on_mesh_inbound("shtf/mesh/inbound", "garbage")
+        assert ds.STATE["mesh"]["messages"] == []
+
+    def test_message_log_bounded_to_50(self, mqtt):
+        for i in range(55):
+            mqtt._on_mesh_inbound("shtf/mesh/inbound", {"from": "x", "text": str(i)})
+        assert len(ds.STATE["mesh"]["messages"]) == 50
+        assert ds.STATE["mesh"]["messages"][0]["text"] == "5"
+
+
 class TestPublishWardCommand:
     """The dashboard MQTT credential is deliberately read-only across
     shtf/# except one narrow write exception for shtf/ward/command/# (see

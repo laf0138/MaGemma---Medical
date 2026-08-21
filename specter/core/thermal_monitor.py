@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "thermal" account:

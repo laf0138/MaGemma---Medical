@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # ─── Version ──────────────────────────────────────────────────────────────────
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SPECTER_USER  = "specter"
 SPECTER_GROUP = "specter"
 
@@ -77,6 +77,23 @@ MQTT_SERVICES: dict[str, dict] = {
             ("write", "shtf/ward/alert"),
         ],
     },
+    "mesh": {
+        "username": "specter-mesh",
+        "acl": [
+            # Read-only on every alert source it relays - it can observe
+            # trauma/ward/system alarms but cannot write into any of them,
+            # so a leaked mesh credential can't forge a casualty or ward
+            # state. shtf/mesh/command/# is its own narrow inbound channel
+            # for operator-composed outbound mesh messages.
+            ("read", "shtf/trauma/alert"),
+            ("read", "shtf/ward/alert"),
+            ("read", "shtf/system/alarm"),
+            ("read", "shtf/mesh/command/#"),
+            ("write", "shtf/mesh/status"),
+            ("write", "shtf/mesh/sent"),
+            ("write", "shtf/mesh/inbound"),
+        ],
+    },
     "medical_ai": {
         "username": "specter-medical-ai",
         "acl": [
@@ -85,6 +102,11 @@ MQTT_SERVICES: dict[str, dict] = {
             ("read", "shtf/medical/profile/#"),
             ("write", "shtf/medical/diagnosis/#"),
             ("write", "shtf/medical/ai/status"),
+            # MAP/pulse pressure/shock index/NEWS2/qSOFA/fever burden/
+            # delta-from-baseline (VitalsCache.derived(), see
+            # medical/clinical_scores.py) - a distinct topic from
+            # diagnosis/# above, so it needs its own explicit grant.
+            ("write", "shtf/medical/derived/#"),
         ],
     },
     "medical_hub": {
@@ -224,6 +246,7 @@ PIP_PACKAGES = [
     "eventlet==0.41.2", "requests==2.33.1",
     "pyserial", "gps3",
     "matplotlib",
+    "meshtastic==2.7.11",
 ]
 
 # ─── Logger ───────────────────────────────────────────────────────────────────

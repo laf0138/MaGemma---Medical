@@ -1,0 +1,24 @@
+[Unit]
+Description=SPECTER Mesh Relay (LoRa/Meshtastic internal comms + alarm notification)
+After=network.target specter-mqtt.service
+
+[Service]
+Type=simple
+User=specter
+Group=dialout
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/mesh/specter_mesh_relay.py --mqtt-host 192.168.1.1
+# If more than one USB-serial device is attached, auto-detection is
+# ambiguous and the service will idle (see specter_mesh_relay.py's
+# MeshtasticHardware docstring) until you pin the port explicitly:
+#   ExecStart=/opt/specter/venv/bin/python /opt/specter/mesh/specter_mesh_relay.py --mqtt-host 192.168.1.1 --serial-port /dev/ttyUSB0
+Restart=always
+RestartSec=5
+StateDirectory=specter
+StateDirectoryMode=0755
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-mesh
+
+[Install]
+WantedBy=multi-user.target

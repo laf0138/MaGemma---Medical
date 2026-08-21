@@ -29,7 +29,7 @@ from flask_socketio import SocketIO, emit
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
 DASHBOARD_DIR = Path(__file__).parent
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 START_TIME = time.time()
 
 # Same-origin CORS and no anonymous MQTT stop a page on another origin or
@@ -125,6 +125,7 @@ STATE: dict = {
     "sdr": {"devices": {}},
     "thermal": {"cpu_temp_c": 0, "throttle": {}},
     "ward": {"episodes": [], "updated": 0},
+    "mesh": {"status": "unknown", "updated": 0, "messages": []},
     "alarms": [],
     "system": {"uptime": 0, "version": VERSION},
     "mqtt_connected": False,
@@ -288,6 +289,8 @@ class DashboardMQTT:
         "shtf/system/state":    "_on_system_state",
         "shtf/ward/episode":    "_on_ward_episode",
         "shtf/ward/alert":      "_on_ward_alert",
+        "shtf/mesh/status":     "_on_mesh_status",
+        "shtf/mesh/inbound":    "_on_mesh_inbound",
     }
 
     def __init__(self, broker: str, port: int,
@@ -404,6 +407,25 @@ class DashboardMQTT:
         if isinstance(data, list):
             for alert in data:
                 self._on_alarm(topic, alert)
+
+    def _on_mesh_status(self, topic: str, data):
+        with STATE_LOCK:
+            if isinstance(data, dict):
+                STATE["mesh"]["status"] = data.get("state", "unknown")
+                STATE["mesh"]["updated"] = time.time()
+        self._push("mesh_status", STATE["mesh"])
+
+    def _on_mesh_inbound(self, topic: str, data):
+        # specter_mesh_relay.py publishes one {"from","text","timestamp_utc"}
+        # object per inbound mesh message (not retained) - keep a bounded
+        # rolling log the same way STATE["alarms"] does, rather than growing
+        # unbounded for a long-running dashboard process.
+        if not isinstance(data, dict):
+            return
+        with STATE_LOCK:
+            STATE["mesh"]["messages"].append(data)
+            STATE["mesh"]["messages"] = STATE["mesh"]["messages"][-50:]
+        self._push("mesh_message", data)
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic

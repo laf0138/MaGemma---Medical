@@ -31,6 +31,7 @@ import core.thermal_monitor as thermal_mod
 import dashboard.dashboard_server as dashboard_mod
 import medical.specter_medical_ai as medical_ai_mod
 import medical.specter_medical_hub as medical_hub_mod
+import mesh.specter_mesh_relay as mesh_mod
 import services.library_api as library_mod
 import services.specter_rx_ring_buffer as rx_mod
 import trauma.specter_trauma as trauma_mod
@@ -176,6 +177,30 @@ class TestWardCredentialsResolution:
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
         assert ward_mod._mqtt_credentials() == (
             ward_mod.MQTT_DEFAULT_USERNAME, ward_mod.MQTT_DEFAULT_PASSWORD,
+        )
+
+
+class TestMeshCredentialsResolution:
+    def test_service_entry_wins(self, monkeypatch):
+        write_specter_json(monkeypatch, {
+            "mqtt": {"services": {"mesh": {"username": "specter-mesh", "password": "svc-pass"}}}
+        })
+        assert mesh_mod._mqtt_credentials() == ("specter-mesh", "svc-pass")
+
+    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
+        write_specter_json(monkeypatch, {
+            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
+        })
+        assert mesh_mod._mqtt_credentials() == (
+            mesh_mod.MQTT_DEFAULT_USERNAME, mesh_mod.MQTT_DEFAULT_PASSWORD,
+        )
+
+    def test_falls_back_to_hardcoded_default_when_config_missing(self, monkeypatch):
+        import pathlib
+        monkeypatch.setattr(pathlib.Path, "read_text",
+                             lambda self: (_ for _ in ()).throw(FileNotFoundError()))
+        assert mesh_mod._mqtt_credentials() == (
+            mesh_mod.MQTT_DEFAULT_USERNAME, mesh_mod.MQTT_DEFAULT_PASSWORD,
         )
 
 

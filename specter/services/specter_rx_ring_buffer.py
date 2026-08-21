@@ -64,7 +64,7 @@ def _require(module_name: str, pip_name: str | None = None):
 
 # ─── Constants & Defaults ─────────────────────────────────────────────────────
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 APP_DIR          = Path("/opt/specter")
 CONFIG_DIR       = Path("/etc/specter")
