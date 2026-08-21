@@ -54,15 +54,22 @@ def extract_pdf_text(pdf_path: Path) -> str:
     """Extract plain text from a PDF file."""
     try:
         import pdfplumber
-        text_parts = []
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    text_parts.append(t)
-        return "\n".join(text_parts)
     except ImportError:
-        pass
+        pdfplumber = None
+
+    if pdfplumber is not None:
+        try:
+            text_parts = []
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t:
+                        text_parts.append(t)
+            return "\n".join(text_parts)
+        except Exception as e:
+            log.warning(
+                "pdfplumber failed for %s: %s — falling back to PyPDF2", pdf_path.name, e
+            )
 
     try:
         import PyPDF2

@@ -5,6 +5,8 @@ requires a real ChromaDB instance and isn't covered here - it's a thin
 orchestration layer over these already-tested pieces plus ChromaDB calls.
 """
 import hashlib
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -124,3 +126,67 @@ class TestExtractPdfTextFallback:
         # matching the documented graceful-degradation path: no PDF library
         # available should never crash the index builder.
         assert bi.extract_pdf_text(Path("/nonexistent/doc.pdf")) == ""
+
+
+def _fake_pdfplumber_module(pages_text=None, open_raises=None):
+    """Build a fake 'pdfplumber' module and register it in sys.modules so
+    `import pdfplumber` inside extract_pdf_text() resolves to it, without
+    needing the real (heavy) dependency installed."""
+    module = types.ModuleType("pdfplumber")
+
+    if open_raises is not None:
+        def _open(path):
+            raise open_raises
+        module.open = _open
+        return module
+
+    class FakePage:
+        def __init__(self, text):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class FakePDF:
+        def __init__(self, pages):
+            self.pages = pages
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _open(path):
+        return FakePDF([FakePage(t) for t in (pages_text or [])])
+
+    module.open = _open
+    return module
+
+
+class TestExtractPdfTextWithPdfplumberInstalled:
+    """Regression tests for the bug where extract_pdf_text() only caught
+    ImportError around the pdfplumber block - a real parsing failure (corrupt
+    PDF, decode error) with pdfplumber actually installed propagated
+    uncaught and would have crashed build_index() partway through a run
+    instead of skipping the one bad file."""
+
+    def test_successful_extraction_joins_page_text(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pdfplumber",
+                             _fake_pdfplumber_module(pages_text=["page one", "page two"]))
+        result = bi.extract_pdf_text(Path("/fake.pdf"))
+        assert result == "page one\npage two"
+
+    def test_pages_with_no_extractable_text_are_skipped(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pdfplumber",
+                             _fake_pdfplumber_module(pages_text=["real text", None, ""]))
+        result = bi.extract_pdf_text(Path("/fake.pdf"))
+        assert result == "real text"
+
+    def test_parse_failure_does_not_raise_and_falls_back_gracefully(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pdfplumber",
+                             _fake_pdfplumber_module(open_raises=RuntimeError("corrupt PDF stream")))
+        # PyPDF2 isn't installed either in this environment, so the overall
+        # result is still "" - the important thing is it doesn't raise.
+        result = bi.extract_pdf_text(Path("/fake.pdf"))
+        assert result == ""
