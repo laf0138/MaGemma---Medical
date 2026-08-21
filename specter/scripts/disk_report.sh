@@ -7,7 +7,7 @@ TOPIC="shtf/system/disk"
 
 # Broker requires auth (docs/MANUAL.md Part 3.3) - read the credential the
 # installer wrote to specter.json, falling back to the documented default.
-MQTT_USER=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('username','specter'))" 2>/dev/null || echo "specter")
+MQTT_USER=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('username','specter-operator'))" 2>/dev/null || echo "specter-operator")
 MQTT_PASS=$(python3 -c "import json;print(json.load(open('/etc/specter/specter.json')).get('mqtt',{}).get('password','specter-change-me'))" 2>/dev/null || echo "specter-change-me")
 
 LIVE_USED=$(df -h /mnt/specter/live  2>/dev/null | awk 'NR==2{print $3}')

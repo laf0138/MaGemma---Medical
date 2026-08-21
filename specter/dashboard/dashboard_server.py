@@ -29,10 +29,14 @@ CONFIG_PATH = Path("/etc/specter/specter.json")
 DASHBOARD_DIR = Path(__file__).parent
 VERSION = "1.0.0"
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "dashboard"
+# account: broad READ across shtf/# to drive the UI, zero WRITE - a
+# leaked dashboard credential can only observe, never forge a command.
+# Fallback values below are used only when specter.json has no
+# mqtt.services.dashboard entry (e.g. running outside a real install).
+MQTT_SERVICE_KEY      = "dashboard"
+MQTT_DEFAULT_USERNAME = "specter-dashboard"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 logging.basicConfig(
@@ -257,16 +261,17 @@ class DashboardMQTT:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    dash_cfg  = cfg.get("dashboard", {})
-    mqtt_cfg  = cfg.get("mqtt", {})
+    dash_cfg    = cfg.get("dashboard", {})
+    mqtt_cfg    = cfg.get("mqtt", {})
+    service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
     host = dash_cfg.get("host", "0.0.0.0")
     port = dash_cfg.get("port", 5000)
 
     mqtt = DashboardMQTT(
         broker   = mqtt_cfg.get("broker", "192.168.1.1"),
         port     = mqtt_cfg.get("port", 1883),
-        username = mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
-        password = mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+        username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
+        password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
     )
     mqtt.start()
 

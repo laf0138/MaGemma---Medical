@@ -32,7 +32,7 @@ sudo python3 /opt/specter/deploy/install_specter.py
 
 # Verify
 bash /opt/specter/scripts/health_check.sh
-mosquitto_sub -h 192.168.1.1 -u specter -P "$SPECTER_MQTT_PASSWORD" -t 'shtf/#' -v
+mosquitto_sub -h 192.168.1.1 -u specter-operator -P "$SPECTER_MQTT_PASSWORD" -t 'shtf/#' -v
 ```
 
 ## Try the trauma screens with no hardware

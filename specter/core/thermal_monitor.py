@@ -29,10 +29,13 @@ from pathlib import Path
 CONFIG_PATH = Path("/etc/specter/specter.json")
 VERSION = "1.0.0"
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "thermal" account:
+# it can only write shtf/system/thermal and shtf/system/alarm - no read
+# access at all. Fallback values below are used only when specter.json
+# has no mqtt.services.thermal entry (e.g. running outside a real install).
+MQTT_SERVICE_KEY      = "thermal"
+MQTT_DEFAULT_USERNAME = "specter-thermal"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 TOPIC_THERMAL = "shtf/system/thermal"
@@ -119,10 +122,11 @@ class ThermalMonitor:
         try:
             raw_cfg = json.loads(CONFIG_PATH.read_text())
             mqtt    = raw_cfg.get("mqtt", {})
+            service_cfg = mqtt.get("services", {}).get(MQTT_SERVICE_KEY, {})
             self.broker   = mqtt.get("broker", "192.168.1.1")
             self.port     = mqtt.get("port", 1883)
-            self.username = mqtt.get("username", MQTT_DEFAULT_USERNAME)
-            self.password = mqtt.get("password", MQTT_DEFAULT_PASSWORD)
+            self.username = service_cfg.get("username", mqtt.get("username", MQTT_DEFAULT_USERNAME))
+            self.password = service_cfg.get("password", mqtt.get("password", MQTT_DEFAULT_PASSWORD))
         except Exception:
             self.broker   = "192.168.1.1"
             self.port     = 1883

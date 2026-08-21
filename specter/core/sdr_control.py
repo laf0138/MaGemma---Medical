@@ -25,10 +25,13 @@ from pathlib import Path
 CONFIG_PATH = Path("/etc/specter/specter.json")
 VERSION = "1.0.0"
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "sdr_control"
+# account: it can only read shtf/sdr/cmd and write its own status/alarm
+# topics. Fallback values below are used only when specter.json has no
+# mqtt.services.sdr_control entry (e.g. running outside a real install).
+MQTT_SERVICE_KEY      = "sdr_control"
+MQTT_DEFAULT_USERNAME = "specter-sdr-control"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 TOPIC_SDR_STATUS  = "shtf/sdr/status"
@@ -94,10 +97,11 @@ class SDRControlService:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
         self.port     = mqtt_cfg.get("port", 1883)
-        self.username = mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)
-        self.password = mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)
+        self.username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME))
+        self.password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD))
 
         self._devices   = {}
         self._procs:    dict[str, subprocess.Popen] = {}

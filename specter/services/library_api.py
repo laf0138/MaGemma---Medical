@@ -47,22 +47,28 @@ VECTOR_INDEX    = Path(os.environ.get("VECTOR_INDEX_DIR", "/mnt/specter/library/
 MQTT_BROKER     = os.environ.get("MQTT_BROKER",        "192.168.1.1")
 API_PORT        = int(os.environ.get("LIBRARY_API_PORT", "5001"))
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "library_api"
+# account: it can only read shtf/library/ask and write its own response/
+# status topics. Fallback values below are used only when specter.json
+# has no mqtt.services.library_api entry (e.g. running outside a real
+# install).
+MQTT_SERVICE_KEY      = "library_api"
+MQTT_DEFAULT_USERNAME = "specter-library-api"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read MQTT username/password from /etc/specter/specter.json (written
-    by the installer) if available, else fall back to the documented default."""
+    """Read this service's MQTT username/password from
+    /etc/specter/specter.json (written by the installer) if available,
+    else fall back to the documented default."""
     try:
         specter_cfg = json.loads(Path("/etc/specter/specter.json").read_text())
         mqtt_cfg = specter_cfg.get("mqtt", {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         return (
-            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
-            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
+            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
         )
     except Exception:
         return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD

@@ -24,10 +24,15 @@ from pathlib import Path
 CONFIG_PATH = Path("/etc/specter/specter.json")
 VERSION = "1.0.0"
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth; these are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "coordinator"
+# account: broad READ across shtf/# (its job is mesh-wide monitoring) but
+# WRITE limited to alarm/state/heartbeat, so it can't forge a trauma or
+# medical command. Fallback values below are used only when specter.json
+# has no mqtt.services.coordinator entry (e.g. running outside a real
+# install).
+MQTT_SERVICE_KEY      = "coordinator"
+MQTT_DEFAULT_USERNAME = "specter-coordinator"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 TOPIC_WILDCARD    = "shtf/#"
@@ -54,10 +59,11 @@ class MQTTCoordinator:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
         self.port     = mqtt_cfg.get("port", 1883)
-        self.username = mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)
-        self.password = mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)
+        self.username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME))
+        self.password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD))
 
         self.state: dict = {
             "pis": {},

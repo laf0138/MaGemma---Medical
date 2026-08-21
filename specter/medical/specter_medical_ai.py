@@ -43,22 +43,28 @@ def _mqtt_client(client_id: str = ""):
 # ---------------------------------------------------------------------------
 
 # --- MQTT auth --------------------------------------------------------------
-# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "medical_ai" account:
+# it can only read the vitals/query/profile topics and write its own
+# diagnosis/status topics. Fallback values below are used only when
+# specter.json has no mqtt.services.medical_ai entry (e.g. running outside
+# a real install).
+MQTT_SERVICE_KEY      = "medical_ai"
+MQTT_DEFAULT_USERNAME = "specter-medical-ai"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read MQTT username/password from /etc/specter/specter.json (written
-    by the installer) if available, else fall back to the documented default."""
+    """Read this service's MQTT username/password from
+    /etc/specter/specter.json (written by the installer) if available,
+    else fall back to the documented default."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
         mqtt_cfg = cfg.get("mqtt", {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         return (
-            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
-            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
+            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
         )
     except Exception:
         return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD

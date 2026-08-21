@@ -30,8 +30,10 @@ def _mqtt_client(client_id: str = ""):
 # ---------------------------------------------------------------------------
 
 # --- MQTT auth --------------------------------------------------------------
-# See docs/MANUAL.md Part 3.3 - the broker requires auth.
-MQTT_DEFAULT_USERNAME = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth. This is an
+# operator-invoked CLI viewer, not a systemd service, so it shares the
+# broad "operator" role rather than getting its own dedicated ACL account.
+MQTT_DEFAULT_USERNAME = "specter-operator"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 

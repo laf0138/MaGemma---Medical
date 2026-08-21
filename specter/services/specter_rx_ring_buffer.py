@@ -88,22 +88,28 @@ MQTT_PORT_DEFAULT       = 1883
 MQTT_KEEPALIVE          = 60
 MQTT_STATUS_INTERVAL    = 10       # seconds between heartbeats
 
-# See docs/MANUAL.md Part 3.3 - the broker requires auth. These are the
-# fallback credentials used only when specter.json has no mqtt.username/
-# mqtt.password (e.g. running outside a real install).
-MQTT_DEFAULT_USERNAME   = "specter"
+# See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
+# least-privilege ACL account per service. This is the "rx_buffer"
+# account: it can only read shtf/rx/trigger and write its own status/
+# event/recording/alarm topics. Fallback values below are used only when
+# specter.json has no mqtt.services.rx_buffer entry (e.g. running outside
+# a real install).
+MQTT_SERVICE_KEY        = "rx_buffer"
+MQTT_DEFAULT_USERNAME   = "specter-rx-buffer"
 MQTT_DEFAULT_PASSWORD   = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read MQTT username/password from /etc/specter/specter.json (written
-    by the installer) if available, else fall back to the documented default."""
+    """Read this service's MQTT username/password from
+    /etc/specter/specter.json (written by the installer) if available,
+    else fall back to the documented default."""
     try:
         cfg = json.loads((CONFIG_DIR / "specter.json").read_text())
         mqtt_cfg = cfg.get("mqtt", {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         return (
-            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
-            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
+            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
         )
     except Exception:
         return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD

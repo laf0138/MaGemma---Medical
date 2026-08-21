@@ -38,14 +38,116 @@ SPECTER_GROUP = "specter"
 
 # ─── MQTT broker credentials ──────────────────────────────────────────────────
 # The broker (Mosquitto) requires authentication - see docs/MANUAL.md Part 3.3.
-# Every node's install run must resolve to the SAME credential, since there is
+# Every node's install run must resolve to the SAME credentials, since there is
 # no central secret store on an air-gapped mesh: export SPECTER_MQTT_PASSWORD
 # before running this installer on every node (Node 1 and every node cloned
 # from it via clone_deploy.py will then agree automatically).
-MQTT_DEFAULT_USERNAME = "specter"
+#
+# Each service gets its own MQTT username and a password DERIVED from the one
+# master password, so independent installer runs still agree without needing
+# to distribute ten separate secrets - and so a leaked service credential
+# doesn't hand over every other service's credential too. The "operator"
+# entry is the broad, human-facing credential used for manual mosquitto_pub/
+# mosquitto_sub troubleshooting and the CLI tools (health_check.sh,
+# disk_report.sh, specter_trauma_monitor.py) that aren't systemd services.
+MQTT_DEFAULT_USERNAME = "specter-operator"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 MQTT_USERNAME = os.environ.get("SPECTER_MQTT_USER", MQTT_DEFAULT_USERNAME)
 MQTT_PASSWORD = os.environ.get("SPECTER_MQTT_PASSWORD", MQTT_DEFAULT_PASSWORD)
+
+# service key -> (mqtt username, ACL rules). Rules are (permission, topic)
+# pairs using standard MQTT ACL wildcards (+ single level, # multi-level).
+MQTT_SERVICES: dict[str, dict] = {
+    "trauma": {
+        "username": "specter-trauma",
+        "acl": [
+            ("read", "shtf/trauma/command/#"),
+            ("write", "shtf/trauma/scene"),
+            ("write", "shtf/trauma/casualty/#"),
+            ("write", "shtf/trauma/alert"),
+            ("write", "shtf/trauma/protocol"),
+        ],
+    },
+    "medical_ai": {
+        "username": "specter-medical-ai",
+        "acl": [
+            ("read", "shtf/medical/vitals/#"),
+            ("read", "shtf/medical/query/#"),
+            ("read", "shtf/medical/profile/#"),
+            ("write", "shtf/medical/diagnosis/#"),
+            ("write", "shtf/medical/ai/status"),
+        ],
+    },
+    "medical_hub": {
+        "username": "specter-medical-hub",
+        "acl": [
+            ("read", "shtf/medical/hub/command/#"),
+            ("write", "shtf/medical/vitals/#"),
+        ],
+    },
+    "coordinator": {
+        "username": "specter-coordinator",
+        "acl": [
+            # Coordinating/monitoring the whole mesh is this service's job -
+            # broad READ is intentional. It cannot write outside these three
+            # topics, so it can't forge a trauma or medical command.
+            ("read", "shtf/#"),
+            ("write", "shtf/system/alarm"),
+            ("write", "shtf/system/state"),
+            ("write", "shtf/system/heartbeat"),
+        ],
+    },
+    "sdr_control": {
+        "username": "specter-sdr-control",
+        "acl": [
+            ("read", "shtf/sdr/cmd"),
+            ("write", "shtf/sdr/status"),
+            ("write", "shtf/system/alarm"),
+        ],
+    },
+    "thermal": {
+        "username": "specter-thermal",
+        "acl": [
+            ("write", "shtf/system/thermal"),
+            ("write", "shtf/system/alarm"),
+        ],
+    },
+    "dashboard": {
+        "username": "specter-dashboard",
+        "acl": [
+            # Same reasoning as coordinator: broad READ to drive the UI,
+            # zero WRITE - a leaked dashboard credential can only observe.
+            ("read", "shtf/#"),
+        ],
+    },
+    "library_api": {
+        "username": "specter-library-api",
+        "acl": [
+            ("read", "shtf/library/ask"),
+            ("write", "shtf/library/response"),
+            ("write", "shtf/library/status"),
+        ],
+    },
+    "rx_buffer": {
+        "username": "specter-rx-buffer",
+        "acl": [
+            ("read", "shtf/rx/trigger"),
+            ("write", "shtf/rx/status"),
+            ("write", "shtf/rx/event"),
+            ("write", "shtf/rx/recording"),
+            ("write", "shtf/system/alarm"),
+        ],
+    },
+}
+
+
+def _derive_service_password(master_password: str, service: str) -> str:
+    """Deterministic per-service password derived from the one master
+    secret, so every node's independent install run agrees without a
+    central secret store. Not a substitute for a real per-node secret
+    manager - see docs/MANUAL.md Part 7.2."""
+    import hashlib
+    return hashlib.sha256(f"{master_password}:{service}".encode()).hexdigest()[:24]
 
 # ─── Install paths ────────────────────────────────────────────────────────────
 BASE_DIR    = Path("/opt/specter")
@@ -425,12 +527,14 @@ def write_configs(report: InstallReport) -> None:
 
     # MQTT / Mosquitto
     mqtt_passwd_file = "/etc/mosquitto/specter_passwd"
+    mqtt_acl_file    = "/etc/mosquitto/specter_acl"
     mosquitto_conf = CONFIG_DIR / "mosquitto.conf"
     mosquitto_conf.write_text(textwrap.dedent(f"""\
         # SPECTER MQTT Broker Config
         listener 1883 0.0.0.0
         allow_anonymous false
         password_file {mqtt_passwd_file}
+        acl_file {mqtt_acl_file}
         persistence true
         persistence_location /var/lib/mosquitto/
         log_dest file /var/log/specter/mosquitto.log
@@ -440,16 +544,54 @@ def write_configs(report: InstallReport) -> None:
     shutil.copy2(mosquitto_conf, "/etc/mosquitto/conf.d/specter.conf")
     step("Mosquitto config written")
 
+    # Resolve every service's credential up front (operator role + one
+    # entry per systemd-managed service), then write the password file and
+    # the matching ACL file so each username can only touch its own topics.
+    resolved_services = {
+        key: {
+            "username": svc["username"],
+            "password": _derive_service_password(MQTT_PASSWORD, key),
+            "acl": svc["acl"],
+        }
+        for key, svc in MQTT_SERVICES.items()
+    }
+
     try:
         subprocess.run(
             ["mosquitto_passwd", "-b", "-c", mqtt_passwd_file, MQTT_USERNAME, MQTT_PASSWORD],
             check=True, capture_output=True,
         )
+        for svc in resolved_services.values():
+            subprocess.run(
+                ["mosquitto_passwd", "-b", mqtt_passwd_file, svc["username"], svc["password"]],
+                check=True, capture_output=True,
+            )
         os.chmod(mqtt_passwd_file, 0o640)
         shutil.chown(mqtt_passwd_file, group="mosquitto")
-        step("Mosquitto password file written")
+        step(f"Mosquitto password file written ({1 + len(resolved_services)} accounts)")
     except Exception as e:
         warn(f"Could not generate mosquitto password file: {e}")
+
+    acl_lines = [
+        "# SPECTER MQTT ACLs - generated by install_specter.py, do not hand-edit.",
+        "# Re-run the installer to regenerate after changing MQTT_SERVICES.",
+        "",
+        f"user {MQTT_USERNAME}",
+        "topic readwrite shtf/#",
+        "",
+    ]
+    for svc in resolved_services.values():
+        acl_lines.append(f"user {svc['username']}")
+        for permission, topic in svc["acl"]:
+            acl_lines.append(f"topic {permission} {topic}")
+        acl_lines.append("")
+    Path(mqtt_acl_file).write_text("\n".join(acl_lines))
+    try:
+        os.chmod(mqtt_acl_file, 0o640)
+        shutil.chown(mqtt_acl_file, group="mosquitto")
+    except Exception as e:
+        warn(f"Could not set ACL file permissions: {e}")
+    step("Mosquitto ACL file written")
 
     if MQTT_PASSWORD == MQTT_DEFAULT_PASSWORD:
         warn(
@@ -464,8 +606,12 @@ def write_configs(report: InstallReport) -> None:
         "mqtt": {
             "broker": "192.168.1.1",
             "port": 1883,
-            "username": MQTT_USERNAME,
+            "username": MQTT_USERNAME,  # "operator" role - CLI tools, manual troubleshooting
             "password": MQTT_PASSWORD,
+            "services": {
+                key: {"username": svc["username"], "password": svc["password"]}
+                for key, svc in resolved_services.items()
+            },
         },
         "network": {
             "pi1_ip": "192.168.1.1",

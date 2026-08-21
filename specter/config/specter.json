@@ -5,8 +5,19 @@
     "broker": "192.168.1.1",
     "port": 1883,
     "keepalive": 60,
-    "username": "specter",
-    "password": "specter-change-me"
+    "username": "specter-operator",
+    "password": "specter-change-me",
+    "services": {
+      "trauma":      {"username": "specter-trauma",      "password": "specter-change-me"},
+      "medical_ai":  {"username": "specter-medical-ai",  "password": "specter-change-me"},
+      "medical_hub": {"username": "specter-medical-hub", "password": "specter-change-me"},
+      "coordinator": {"username": "specter-coordinator", "password": "specter-change-me"},
+      "sdr_control": {"username": "specter-sdr-control", "password": "specter-change-me"},
+      "thermal":     {"username": "specter-thermal",     "password": "specter-change-me"},
+      "dashboard":   {"username": "specter-dashboard",   "password": "specter-change-me"},
+      "library_api": {"username": "specter-library-api", "password": "specter-change-me"},
+      "rx_buffer":   {"username": "specter-rx-buffer",   "password": "specter-change-me"}
+    }
   },
   "network": {
     "pi1_ip": "192.168.1.1",
