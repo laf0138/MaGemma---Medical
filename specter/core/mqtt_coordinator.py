@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "coordinator"
@@ -59,11 +59,32 @@ class MQTTCoordinator:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
         self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
         self.port     = mqtt_cfg.get("port", 1883)
-        self.username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME))
-        self.password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD))
+        if service_cfg:
+            self.username = service_cfg.get("username", MQTT_DEFAULT_USERNAME)
+            self.password = service_cfg.get("password", MQTT_DEFAULT_PASSWORD)
+        else:
+            # No dedicated services.<key> entry - do NOT fall back to the
+            # broad "operator" credential (mqtt.username/password). The
+            # coordinator's own ACL is already broad-READ by design, but
+            # "operator" is readWRITE on shtf/# - falling back to it would
+            # still hand this service write access its own ACL never
+            # grants. Fall to this service's own documented default
+            # instead - on a real broker its password won't match the
+            # real (derived) one for this account, so the connection is
+            # rejected rather than silently succeeding with elevated
+            # access.
+            log.error(
+                "specter.json has no mqtt.services.%s entry - using this "
+                "service's own default credential (which will fail to "
+                "authenticate against a real broker) instead of the broad "
+                "operator account. Re-run deploy/install_specter.py.",
+                MQTT_SERVICE_KEY,
+            )
+            self.username = MQTT_DEFAULT_USERNAME
+            self.password = MQTT_DEFAULT_PASSWORD
 
         self.state: dict = {
             "pis": {},

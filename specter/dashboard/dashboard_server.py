@@ -327,15 +327,39 @@ class DashboardMQTT:
 def main() -> int:
     dash_cfg    = cfg.get("dashboard", {})
     mqtt_cfg    = cfg.get("mqtt", {})
-    service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
+    service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
     host = dash_cfg.get("host", "0.0.0.0")
     port = dash_cfg.get("port", 5000)
+
+    if service_cfg:
+        mqtt_username = service_cfg.get("username", MQTT_DEFAULT_USERNAME)
+        mqtt_password = service_cfg.get("password", MQTT_DEFAULT_PASSWORD)
+    else:
+        # No dedicated services.<key> entry - do NOT fall back to the
+        # broad "operator" credential (mqtt.username/password). The
+        # dashboard's own ACL is already broad-READ by design, but
+        # "operator" is readWRITE on shtf/# - falling back to it would
+        # still hand this service write access (including trigger_rx-
+        # adjacent topics) its own ACL never grants. Fall to this
+        # service's own documented default instead - on a real broker its
+        # password won't match the real (derived) one for this account,
+        # so the connection is rejected rather than silently succeeding
+        # with elevated access.
+        log.error(
+            "specter.json has no mqtt.services.%s entry - using this "
+            "service's own default credential (which will fail to "
+            "authenticate against a real broker) instead of the broad "
+            "operator account. Re-run deploy/install_specter.py.",
+            MQTT_SERVICE_KEY,
+        )
+        mqtt_username = MQTT_DEFAULT_USERNAME
+        mqtt_password = MQTT_DEFAULT_PASSWORD
 
     mqtt = DashboardMQTT(
         broker   = mqtt_cfg.get("broker", "192.168.1.1"),
         port     = mqtt_cfg.get("port", 1883),
-        username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
-        password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
+        username = mqtt_username,
+        password = mqtt_password,
     )
     mqtt.start()
 

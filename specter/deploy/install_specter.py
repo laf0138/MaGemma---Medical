@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # ─── Version ──────────────────────────────────────────────────────────────────
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SPECTER_USER  = "specter"
 SPECTER_GROUP = "specter"
 
@@ -601,10 +601,16 @@ def write_configs(report: InstallReport) -> None:
     step("Mosquitto ACL file written")
 
     if MQTT_PASSWORD == MQTT_DEFAULT_PASSWORD:
+        # main() already refuses to reach this point unless
+        # SPECTER_ALLOW_DEFAULT_MQTT_PASSWORD was explicitly set - this is
+        # a reminder for that deliberate-override path, not the primary
+        # guard.
         warn(
-            "Using the DEFAULT MQTT password - every node must be installed with "
-            "the SAME password, so change it by exporting SPECTER_MQTT_PASSWORD "
-            "before running this installer on every node. See docs/MANUAL.md Part 3.3."
+            "Installing with the DEFAULT MQTT password (explicitly "
+            "overridden via SPECTER_ALLOW_DEFAULT_MQTT_PASSWORD) - every "
+            "node must be installed with the SAME password, so set a real "
+            "one via SPECTER_MQTT_PASSWORD before this leaves the bench. "
+            "See docs/MANUAL.md Part 3.3."
         )
 
     # SPECTER main config
@@ -1012,6 +1018,30 @@ def main() -> int:
 
     if os.geteuid() != 0:
         print("[ERROR] Must be run as root:  sudo python3 install_specter.py")
+        return 1
+
+    if MQTT_PASSWORD == MQTT_DEFAULT_PASSWORD and not os.environ.get(
+        "SPECTER_ALLOW_DEFAULT_MQTT_PASSWORD"
+    ):
+        # Previously this only warned and proceeded anyway (see
+        # write_configs()'s warn() call below) - a documented default
+        # password is not a secret, since it's sitting in this repo's git
+        # history for anyone to read. Refusing to install with it closed
+        # is the actual fix; the warning stays for the (rare, deliberate)
+        # override path.
+        print(textwrap.dedent("""
+        [ABORT] Refusing to install with the published default MQTT password.
+        MQTT_DEFAULT_PASSWORD ("specter-change-me") is public - it's in this
+        repo's git history - so installing with it is not actually private,
+        no matter how obscure the deployment.
+
+        Set a real password before installing:
+          export SPECTER_MQTT_PASSWORD='pick-a-real-password-here'
+
+        Or, ONLY for a bench/lab bring-up with no real patient data at
+        stake, explicitly acknowledge the risk:
+          export SPECTER_ALLOW_DEFAULT_MQTT_PASSWORD=1
+        """))
         return 1
 
     start = time.time()

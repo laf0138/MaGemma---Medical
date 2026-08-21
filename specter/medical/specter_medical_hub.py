@@ -63,11 +63,30 @@ def _mqtt_credentials() -> tuple:
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
         mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
-        return (
-            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
-            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
+        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
+        if service_cfg:
+            return (
+                service_cfg.get("username", MQTT_DEFAULT_USERNAME),
+                service_cfg.get("password", MQTT_DEFAULT_PASSWORD),
+            )
+        # No dedicated services.<key> entry - do NOT fall back to the
+        # broad "operator" credential (mqtt.username/password): that
+        # account has readwrite on shtf/# by design (see
+        # deploy/install_specter.py's ACL for it), so a missing config
+        # entry would silently hand this service far MORE privilege than
+        # its own least-privilege ACL grants, not less. Fall to this
+        # service's own documented default instead - on a real broker its
+        # password won't match the real (derived) one for this account,
+        # so the connection is rejected rather than silently succeeding
+        # with elevated access. Re-run the installer to fix this properly.
+        logger.error(
+            "specter.json has no mqtt.services.%s entry - using this "
+            "service's own default credential (which will fail to "
+            "authenticate against a real broker) instead of the broad "
+            "operator account. Re-run deploy/install_specter.py.",
+            MQTT_SERVICE_KEY,
         )
+        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
     except Exception:
         return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
 # ---------------------------------------------------------------------------

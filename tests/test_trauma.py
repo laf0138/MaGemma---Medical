@@ -437,6 +437,40 @@ class TestSceneRegistryPersistence:
         assert path.exists()
         assert not (tmp_path / "scene.json.tmp").exists()
 
+    # json.loads() can return any JSON value, not just an object - these
+    # three each independently crashed _restore() with an uncaught
+    # AttributeError/ValueError before that method validated the shape of
+    # what it read, contradicting its own documented "starts empty rather
+    # than crashing" behavior. Found by an external review; reproduced,
+    # fixed, pinned here.
+
+    def test_top_level_json_array_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text("[]")
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_null_casualty_entry_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text('{"format": 2, "casualties": {"C-1": null}}')
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_non_numeric_counter_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text('{"format": 2, "casualties": {}, "counter": "NaN"}')
+        r = SceneRegistry(persist_path=str(path))
+        assert r._counter == 0
+
+    def test_non_dict_intervention_entry_is_skipped_not_crashed(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text(
+            '{"format": 2, "casualties": {"C-1": {"casualty_id": "C-1", '
+            '"found_utc": "2026-01-01T00:00:00+00:00", "interventions": [null, "garbage"]}}}'
+        )
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties["C-1"].interventions == []
+
 
 # ---------------------------------------------------------------------------
 # Small time helpers
