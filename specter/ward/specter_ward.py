@@ -56,6 +56,8 @@ from typing import Optional, Dict, Any, List
 
 import paho.mqtt.client as mqtt
 
+from medical.clinical_scores import calculate_news2
+
 # --- paho-mqtt 1.x / 2.x compatibility -------------------------------------
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
@@ -153,148 +155,13 @@ def fmt_elapsed(seconds: float) -> str:
 # 2017) - a standard, publicly documented hospital early-warning score.
 # ===========================================================================
 #
-# This implements Scale 1 only (the scale used for the general population).
-# NEWS2 also defines Scale 2 for patients with known chronic hypercapnic
-# respiratory failure (e.g. severe COPD), which uses different SpO2
-# thresholds and requires knowing the patient's individually prescribed
-# target saturation range - that per-patient clinical judgment call isn't
-# something this module can safely default, so Scale 2 is not implemented.
-# Applying Scale 1 to a chronic hypercapnic patient will under-score their
-# true risk; this is a real, documented limitation, not an oversight.
-#
-# A parameter that is missing from the input is NEVER scored as 0 (normal) -
-# that would silently manufacture a "this looks fine" signal out of no data
-# at all, exactly the kind of fabricated-but-plausible number this whole
-# project exists to avoid. Missing parameters are excluded from the total
-# and named in `missing_parameters`; `partial` is set whenever any are
-# missing, so a caller can render "NEWS2 3 (partial - no temperature)"
-# rather than a bare, falsely-complete "NEWS2 3".
-
-NEWS2_RESPIRATORY_FAILURE_SCALE_NOTE = (
-    "Scale 1 only (general population) - not valid for patients with known "
-    "chronic hypercapnic respiratory failure (Scale 2), which needs an "
-    "individually prescribed target SpO2 range this module does not track."
-)
-
-
-def _news2_rr(rr: float) -> int:
-    if rr <= 8:
-        return 3
-    if rr <= 11:
-        return 1
-    if rr <= 20:
-        return 0
-    if rr <= 24:
-        return 2
-    return 3
-
-
-def _news2_spo2(spo2: float) -> int:
-    if spo2 <= 91:
-        return 3
-    if spo2 <= 93:
-        return 2
-    if spo2 <= 95:
-        return 1
-    return 0
-
-
-def _news2_supplemental_o2(on_o2: bool) -> int:
-    return 2 if on_o2 else 0
-
-
-def _news2_sbp(sbp: float) -> int:
-    if sbp <= 90:
-        return 3
-    if sbp <= 100:
-        return 2
-    if sbp <= 110:
-        return 1
-    if sbp <= 219:
-        return 0
-    return 3
-
-
-def _news2_pulse(hr: float) -> int:
-    if hr <= 40:
-        return 3
-    if hr <= 50:
-        return 1
-    if hr <= 90:
-        return 0
-    if hr <= 110:
-        return 1
-    if hr <= 130:
-        return 2
-    return 3
-
-
-def _news2_consciousness(avpu: str) -> int:
-    return 0 if (avpu or "").strip().upper() == "A" else 3
-
-
-def _news2_temp(temp_c: float) -> int:
-    if temp_c <= 35.0:
-        return 3
-    if temp_c <= 36.0:
-        return 1
-    if temp_c <= 38.0:
-        return 0
-    if temp_c <= 39.0:
-        return 1
-    return 2
-
-
-_NEWS2_PARAMS = {
-    # vitals key -> (scorer, display label)
-    "rr": (_news2_rr, "Respiration rate"),
-    "spo2": (_news2_spo2, "SpO2"),
-    "supplemental_o2": (_news2_supplemental_o2, "Supplemental O2"),
-    "bp_systolic": (_news2_sbp, "Systolic BP"),
-    "pulse": (_news2_pulse, "Pulse"),
-    "avpu": (_news2_consciousness, "Consciousness (ACVPU)"),
-    "temperature_c": (_news2_temp, "Temperature"),
-}
-
-
-def calculate_news2(vitals: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Score present parameters only - see the module-level note above on why
-    a missing parameter is never treated as normal/0.
-
-    Returns: total, risk (low/low-medium/medium/high), per_parameter dict,
-    missing_parameters list, partial bool, scale_note.
-    """
-    per_parameter: Dict[str, int] = {}
-    for key, (scorer, _label) in _NEWS2_PARAMS.items():
-        if key not in vitals or vitals[key] is None:
-            continue
-        try:
-            per_parameter[key] = scorer(vitals[key])
-        except (TypeError, ValueError):
-            continue
-
-    missing = [k for k in _NEWS2_PARAMS if k not in per_parameter]
-    total = sum(per_parameter.values())
-    any_scored_3 = any(v == 3 for v in per_parameter.values())
-
-    if not per_parameter:
-        risk = "unknown"
-    elif total >= 7:
-        risk = "high"
-    elif total >= 5 or any_scored_3:
-        risk = "low-medium" if (any_scored_3 and total < 5) else "medium"
-    else:
-        risk = "low"
-
-    return {
-        "total": total,
-        "risk": risk,
-        "per_parameter": per_parameter,
-        "missing_parameters": missing,
-        "partial": bool(missing),
-        "scale_note": NEWS2_RESPIRATORY_FAILURE_SCALE_NOTE,
-    }
+# Scoring logic lives in specter/medical/clinical_scores.py (imported
+# above), shared with the medical/chronic-patient AI engine so both call
+# sites score identically. This module charts manual bedside entries, where
+# an operator enters every NEWS2 parameter (including respiration rate and
+# consciousness) by hand - that path is usually complete. See
+# clinical_scores.py's module docstring for why the automated-device path
+# (specter_medical_ai.py) is always partial by contrast.
 
 
 # ===========================================================================

@@ -216,6 +216,31 @@ class TestVitalsCachePromptBlock:
         block = cache.to_prompt_block("p1")
         assert "NOT MEASURED" not in block
 
+    def test_derived_metrics_section_appears_with_bp_and_hr(self):
+        cache = VitalsCache()
+        cache.update("p1", "bp_systolic", VitalReading(value=90, unit="mmHg", timestamp_utc=iso()))
+        cache.update("p1", "bp_diastolic", VitalReading(value=60, unit="mmHg", timestamp_utc=iso()))
+        cache.update("p1", "pulse", VitalReading(value=110, unit="bpm", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "DERIVED METRICS" in block
+        assert "MAP: 70.0 mmHg" in block
+        assert "Pulse pressure: 30.0 mmHg" in block
+        assert "Shock index: 1.22" in block
+
+    def test_derived_metrics_section_absent_with_no_readings(self):
+        cache = VitalsCache()
+        block = cache.to_prompt_block("p1")
+        assert "DERIVED METRICS" not in block
+
+    def test_news2_and_qsofa_are_marked_partial_in_prompt(self):
+        cache = VitalsCache()
+        cache.update("p1", "bp_systolic", VitalReading(value=85, unit="mmHg", timestamp_utc=iso()))
+        block = cache.to_prompt_block("p1")
+        assert "NEWS2:" in block
+        assert "PARTIAL" in block
+        assert "qSOFA:" in block
+        assert "cannot rule out positive" in block
+
 
 class TestVitalsCacheEcgFields:
     """The Polar H10 / NeuroKit2 layer (medical/ecg_analysis.py) publishes
@@ -273,6 +298,108 @@ class TestVitalsCacheEcgFields:
             value=[], unit="text", timestamp_utc=iso()))
         block = cache.to_prompt_block("p1")
         assert "ECG advisory flags" not in block
+
+
+# ---------------------------------------------------------------------------
+# VitalsCache.derived() - MAP / pulse pressure / shock index / NEWS2 /
+# qSOFA / fever burden / delta-from-baseline. See docs/
+# SPECTER_MEDICAL_UI_BRIEF.md 1.3 - these were previously documented but
+# not implemented anywhere on the medical/chronic-patient path.
+# ---------------------------------------------------------------------------
+
+class TestVitalsCacheDerived:
+    def test_missing_bp_gives_none_for_map_pp_shock_index(self):
+        cache = VitalsCache()
+        d = cache.derived("p1")
+        assert d["map_mmhg"] is None
+        assert d["pulse_pressure_mmhg"] is None
+        assert d["shock_index"] is None
+
+    def test_map_pulse_pressure_shock_index_computed_from_bp_and_hr(self):
+        cache = VitalsCache()
+        cache.update("p1", "bp_systolic", VitalReading(value=120, unit="mmHg", timestamp_utc=iso()))
+        cache.update("p1", "bp_diastolic", VitalReading(value=80, unit="mmHg", timestamp_utc=iso()))
+        cache.update("p1", "pulse", VitalReading(value=72, unit="bpm", timestamp_utc=iso()))
+        d = cache.derived("p1")
+        assert d["map_mmhg"] == pytest.approx(93.3)
+        assert d["pulse_pressure_mmhg"] == 40.0
+        assert d["shock_index"] == 0.6
+
+    def test_news2_and_qsofa_always_partial_without_rr_or_consciousness(self):
+        cache = VitalsCache()
+        cache.update("p1", "bp_systolic", VitalReading(value=120, unit="mmHg", timestamp_utc=iso()))
+        cache.update("p1", "spo2", VitalReading(value=98, unit="%", timestamp_utc=iso()))
+        cache.update("p1", "pulse", VitalReading(value=72, unit="bpm", timestamp_utc=iso()))
+        cache.update("p1", "temperature_c", VitalReading(value=37.0, unit="C", timestamp_utc=iso()))
+        d = cache.derived("p1")
+        assert d["news2"]["partial"] is True
+        assert set(d["news2"]["missing_parameters"]) == {"rr", "supplemental_o2", "avpu"}
+        assert d["qsofa"]["partial"] is True
+        assert d["qsofa"]["positive"] is None  # never asserted "not positive" when incomplete
+        assert "rr" in d["qsofa"]["missing_parameters"]
+        assert "altered_mentation" in d["qsofa"]["missing_parameters"]
+
+    def test_no_vitals_at_all_still_returns_fully_missing_scores_not_a_crash(self):
+        cache = VitalsCache()
+        d = cache.derived("nobody")
+        assert d["news2"]["risk"] == "unknown"
+        assert d["news2"]["total"] == 0
+        assert d["qsofa"]["total"] == 0
+        assert d["fever_burden_minutes_24h"] is None
+        assert d["delta_from_baseline"] == {}
+
+    def test_derived_note_always_present_and_explains_the_gap(self):
+        cache = VitalsCache()
+        d = cache.derived("p1")
+        assert "always partial" in d["note"]
+        assert "not a persisted" in d["note"]
+
+
+class TestVitalsCacheFeverBurden:
+    def test_no_temperature_history_returns_none(self):
+        cache = VitalsCache()
+        assert cache.fever_burden_minutes("p1") is None
+
+    def test_sustained_fever_accumulates_minutes(self):
+        cache = VitalsCache()
+        cache.update("p1", "temperature_c", VitalReading(
+            value=38.5, unit="C", timestamp_utc=iso(-timedelta(minutes=30))))
+        cache.update("p1", "temperature_c", VitalReading(
+            value=38.5, unit="C", timestamp_utc=iso()))
+        burden = cache.fever_burden_minutes("p1")
+        assert burden == pytest.approx(30.0, abs=0.5)
+
+    def test_afebrile_readings_contribute_no_burden(self):
+        cache = VitalsCache()
+        cache.update("p1", "temperature_c", VitalReading(
+            value=37.0, unit="C", timestamp_utc=iso(-timedelta(minutes=30))))
+        cache.update("p1", "temperature_c", VitalReading(
+            value=37.0, unit="C", timestamp_utc=iso()))
+        assert cache.fever_burden_minutes("p1") == 0.0
+
+    def test_readings_older_than_window_are_excluded(self):
+        cache = VitalsCache()
+        cache.update("p1", "temperature_c", VitalReading(
+            value=39.0, unit="C", timestamp_utc=iso(-timedelta(hours=30))))
+        assert cache.fever_burden_minutes("p1") is None
+
+
+class TestVitalsCacheDeltaFromBaseline:
+    def test_fewer_than_three_readings_returns_none(self):
+        cache = VitalsCache()
+        cache.update("p1", "pulse", VitalReading(value=70, unit="bpm", timestamp_utc=iso()))
+        cache.update("p1", "pulse", VitalReading(value=75, unit="bpm", timestamp_utc=iso()))
+        assert cache.delta_from_baseline("p1", "pulse") is None
+
+    def test_delta_computed_against_median_of_prior_readings(self):
+        cache = VitalsCache()
+        for v in (70, 72, 74, 100):
+            cache.update("p1", "pulse", VitalReading(value=v, unit="bpm", timestamp_utc=iso()))
+        d = cache.delta_from_baseline("p1", "pulse")
+        assert d["current"] == 100
+        assert d["baseline_median"] == 72
+        assert d["delta"] == 28
+        assert d["baseline_sample_size"] == 3
 
 
 # ---------------------------------------------------------------------------

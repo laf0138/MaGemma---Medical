@@ -57,19 +57,21 @@ Urinalysis sub-fields: leukocytes, nitrite, urobilinogen, protein, pH, blood, sp
 
 ### 1.3 Derived — computed, never entered
 
-Compute on Node 1, publish to `shtf/medical/derived/<patient_id>`. Every derived value must display its inputs on tap; a score the operator can't audit is a score they can't trust.
+**STATUS: Implemented (August 2026).** Computed by `medical/specter_medical_ai.py`'s `VitalsCache.derived()` (scoring functions shared with WARD mode via `medical/clinical_scores.py`), published retained to `shtf/medical/derived/<patient_id>` on every vitals update, and surfaced in MedGemma's prompt under a `DERIVED METRICS` block. Every derived value's inputs are in the same MQTT payload (`per_parameter`), so a score the operator can't audit is not possible.
+
+**Known gap vs. this spec, stated plainly rather than glossed over:** no BLE device wired into this build measures respiration rate or level of consciousness. NEWS2 and qSOFA are therefore **always partial** on this path — both are still computed and published (with `partial: true` and `missing_parameters` naming exactly what's absent) rather than withheld, because a partial score that visibly says what it's missing is more useful than no score at all, and hiding it would make it harder to notice the gap should a future sensor (e.g. a capnometer) ever close it. `qSOFA.positive` is `null`, never `false`, whenever an input is missing — a partial qSOFA is never allowed to read as "ruled out." Fever burden and Δ-from-baseline are bounded by the AI engine's in-memory reading history (`VitalsCache.HISTORY_LIMIT`, currently 24 readings per vital, not persisted across restarts) rather than a true persisted 24h/30-day window — Δ-from-baseline is a same-session median, not a 30-day one, until a persisted vitals history exists.
 
 | Metric | Formula | Why it's on this screen |
 |---|---|---|
 | **MAP** | `DBP + (SBP − DBP) / 3` | Organ perfusion. **< 65 is graft-threatening for a transplant recipient** — this is the single most important derived number on the display for the operator. |
 | **Pulse pressure** | `SBP − DBP` | Narrow (< 25) suggests falling stroke volume before SBP drops |
 | **Shock index** | `HR / SBP` | > 0.9 concerning, > 1.0 suggests shock. Rises before BP falls. |
-| **NEWS2** | Aggregate 0–20 from RR, SpO2, supplemental O2, temp, SBP, HR, ACVPU | Early warning. Any single parameter scoring 3 escalates regardless of total. |
-| **qSOFA** | 1 pt each: RR ≥ 22, SBP ≤ 100, altered mentation | Sepsis screen. **≥ 2 in an immunosuppressed patient is an emergency.** |
+| **NEWS2** | Aggregate 0–20 from RR, SpO2, supplemental O2, temp, SBP, HR, ACVPU | Early warning. Any single parameter scoring 3 escalates regardless of total. **Always partial on the automated-device path — see above.** |
+| **qSOFA** | 1 pt each: RR ≥ 22, SBP ≤ 100, altered mentation | Sepsis screen. **≥ 2 in an immunosuppressed patient is an emergency.** **Always partial on the automated-device path — see above.** |
 | **Trend slope** | Least-squares over last 3–6 readings | Direction beats snapshot |
 | **Staleness** | `now − timestamp_utc` | A 40-minute-old SpO2 is not a current SpO2 |
-| **Fever burden** | Minutes above 38.0 °C in last 24 h | Immunosuppressed fevers get blunted; cumulative burden is more honest than peak |
-| **Δ from baseline** | Current vs. this patient's 30-day median | "Normal for them" beats "normal for a textbook" |
+| **Fever burden** | Minutes above 38.0 °C in last 24 h | Immunosuppressed fevers get blunted; cumulative burden is more honest than peak. **Bounded by in-memory history depth — see above.** |
+| **Δ from baseline** | Current vs. this patient's 30-day median | "Normal for them" beats "normal for a textbook". **Currently a same-session median, not 30 days — see above.** |
 
 **Display caveat, shown in the score's detail panel:** NEWS2 and qSOFA are screening aids validated in hospital populations. They flag concern; they do not diagnose. Both are known to under-trigger in immunosuppressed patients whose fever and inflammatory response are pharmacologically suppressed. The display must never let a low score read as reassurance.
 

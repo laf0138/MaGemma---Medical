@@ -33,6 +33,14 @@ from typing import Optional, Dict, Any, List
 import requests
 import paho.mqtt.client as mqtt
 
+from medical.clinical_scores import (
+    calculate_map,
+    calculate_news2,
+    calculate_pulse_pressure,
+    calculate_qsofa,
+    calculate_shock_index,
+)
+
 # --- paho-mqtt 1.x / 2.x compatibility -------------------------------------
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
@@ -338,6 +346,149 @@ class VitalsCache:
             return f"  (trend over last {len(recent)} readings: falling {recent[0]} -> {recent[-1]})"
         return "  (trend: stable)"
 
+    # -- Derived metrics ----------------------------------------------------
+    # See docs/SPECTER_MEDICAL_UI_BRIEF.md Part 1.3 ("Derived - computed,
+    # never entered"). NEWS2 and qSOFA both include respiration rate and/or
+    # consciousness as inputs; no BLE device wired into this build measures
+    # either, so those two scores are ALWAYS partial on this path - see
+    # clinical_scores.py's module docstring. They are still worth computing:
+    # a partial NEWS2/qSOFA that visibly lists what's missing is useful and
+    # honest; silently omitting the score entirely would hide that SPECTER
+    # *could* compute it if respiration rate/consciousness were ever wired
+    # up (e.g. a future capnometer or manual entry), and a caller who wants
+    # the number without checking `partial` deserves that to be impossible.
+
+    def fever_burden_minutes(
+        self,
+        patient_id: str,
+        threshold_c: float = 38.0,
+        window_seconds: int = 86400,
+    ) -> Optional[float]:
+        """
+        Minutes with temperature above threshold_c within the last
+        window_seconds, integrated over the retained temperature history.
+
+        Bounded by HISTORY_LIMIT (only the most recent readings are kept in
+        memory, not persisted across restarts) - if temperature is sampled
+        more often than HISTORY_LIMIT times per window, this undercounts
+        the true 24h burden. That is a real limitation of the current
+        in-memory cache, not a rounding quirk.
+        """
+        hist = self.history(patient_id, "temperature_c")
+        if not hist:
+            return None
+
+        now = datetime.now(timezone.utc)
+        points = []
+        for r in hist:
+            if not isinstance(r.value, (int, float)):
+                continue
+            try:
+                ts = datetime.fromisoformat(r.timestamp_utc)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            age = (now - ts).total_seconds()
+            if age < 0 or age > window_seconds:
+                continue
+            points.append((ts, float(r.value)))
+
+        if not points:
+            return None
+        points.sort(key=lambda p: p[0])
+
+        burden_seconds = 0.0
+        for i, (ts, value) in enumerate(points):
+            interval_end = points[i + 1][0] if i + 1 < len(points) else now
+            interval_end = min(interval_end, now)
+            span = max(0.0, (interval_end - ts).total_seconds())
+            span = min(span, window_seconds)
+            if value > threshold_c:
+                burden_seconds += span
+
+        return round(burden_seconds / 60, 1)
+
+    def delta_from_baseline(
+        self, patient_id: str, reading_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Current reading vs. the median of this reading type's retained
+        history. NOT a persisted 30-day baseline (docs/
+        SPECTER_MEDICAL_UI_BRIEF.md 1.3 specifies 30 days) - there is no
+        long-term vitals store yet, only the in-memory HISTORY_LIMIT window,
+        which resets on every service restart. Returns None until at least
+        3 numeric readings are available, so a same-session baseline is
+        never presented from a single or a pair of readings.
+        """
+        numeric = [
+            r.value for r in self.history(patient_id, reading_type)
+            if isinstance(r.value, (int, float))
+        ]
+        if len(numeric) < 3:
+            return None
+
+        current = numeric[-1]
+        pool = sorted(numeric[:-1])
+        n = len(pool)
+        median = (
+            pool[n // 2] if n % 2 == 1
+            else (pool[n // 2 - 1] + pool[n // 2]) / 2
+        )
+        return {
+            "current": current,
+            "baseline_median": round(median, 2),
+            "delta": round(current - median, 2),
+            "baseline_sample_size": n,
+        }
+
+    def derived(self, patient_id: str) -> Dict[str, Any]:
+        """All derived clinical metrics for one patient's current cache state."""
+        latest = self.latest(patient_id)
+
+        def val(key: str) -> Any:
+            reading = latest.get(key)
+            return reading.value if reading is not None else None
+
+        sbp, dbp, hr = val("bp_systolic"), val("bp_diastolic"), val("pulse")
+
+        # rr, supplemental_o2, avpu (NEWS2) and rr, altered_mentation
+        # (qSOFA) are intentionally never included: no connected device
+        # publishes them, and calculate_news2/calculate_qsofa treat an
+        # absent key as missing, never as a normal/negative reading.
+        news2_input = {
+            k: v for k, v in {
+                "spo2": val("spo2"),
+                "bp_systolic": sbp,
+                "pulse": hr,
+                "temperature_c": val("temperature_c"),
+            }.items() if v is not None
+        }
+        qsofa_input = {k: v for k, v in {"bp_systolic": sbp}.items() if v is not None}
+
+        return {
+            "map_mmhg": calculate_map(sbp, dbp),
+            "pulse_pressure_mmhg": calculate_pulse_pressure(sbp, dbp),
+            "shock_index": calculate_shock_index(hr, sbp),
+            "news2": calculate_news2(news2_input),
+            "qsofa": calculate_qsofa(qsofa_input),
+            "fever_burden_minutes_24h": self.fever_burden_minutes(patient_id),
+            "delta_from_baseline": {
+                k: delta
+                for k in ("bp_systolic", "bp_diastolic", "pulse", "spo2", "temperature_c")
+                for delta in [self.delta_from_baseline(patient_id, k)]
+                if delta is not None
+            },
+            "note": (
+                "NEWS2/qSOFA use connected-device vitals only: this build has no "
+                "respiration rate or consciousness sensor, so both scores are "
+                "always partial (see each score's missing_parameters) and must "
+                "never be read as reassuring on their own. Fever burden and "
+                f"baseline delta are bounded by the last {self.HISTORY_LIMIT} "
+                "readings held in memory, not a persisted 24h/30-day history."
+            ),
+        }
+
     def to_prompt_block(self, patient_id: str) -> str:
         latest = self.latest(patient_id)
         if not latest:
@@ -389,6 +540,31 @@ class VitalsCache:
             lines.append(
                 "  NOTE: one or more readings are stale. Recommend re-measuring "
                 "before acting on them."
+            )
+
+        derived = self.derived(patient_id)
+        derived_lines = []
+        if derived["map_mmhg"] is not None:
+            derived_lines.append(f"  MAP: {derived['map_mmhg']} mmHg")
+        if derived["pulse_pressure_mmhg"] is not None:
+            derived_lines.append(f"  Pulse pressure: {derived['pulse_pressure_mmhg']} mmHg")
+        if derived["shock_index"] is not None:
+            derived_lines.append(f"  Shock index: {derived['shock_index']}")
+        news2 = derived["news2"]
+        if news2["per_parameter"]:
+            partial_txt = " (PARTIAL - missing: " + ", ".join(news2["missing_parameters"]) + ")" if news2["partial"] else ""
+            derived_lines.append(f"  NEWS2: {news2['total']} ({news2['risk']}){partial_txt}")
+        qsofa = derived["qsofa"]
+        if qsofa["per_parameter"]:
+            partial_txt = " (PARTIAL - missing: " + ", ".join(qsofa["missing_parameters"]) + ", cannot rule out positive)" if qsofa["partial"] else ""
+            derived_lines.append(f"  qSOFA: {qsofa['total']}{partial_txt}")
+        if derived["fever_burden_minutes_24h"] is not None:
+            derived_lines.append(f"  Fever burden (>38.0C, last 24h): {derived['fever_burden_minutes_24h']} min")
+        if derived_lines:
+            lines.append("DERIVED METRICS:")
+            lines.extend(derived_lines)
+            lines.append(
+                "  " + derived["note"]
             )
 
         return "\n".join(lines)
@@ -699,6 +875,9 @@ class MedicalAIEngine:
             )
         elif len(parts) >= 5:
             self._store_reading(patient_id, payload, reading_type=parts[4])
+        else:
+            return
+        self._publish_derived(patient_id)
 
     def _store_reading(
         self,
@@ -863,6 +1042,16 @@ class MedicalAIEngine:
         }
         payload.update(extra)
         self.mqtt.publish("shtf/medical/ai/status", json.dumps(payload), qos=1)
+
+    def _publish_derived(self, patient_id: str) -> None:
+        """Per docs/SPECTER_MEDICAL_UI_BRIEF.md 1.3: derived metrics get
+        their own retained topic so a dashboard can render them without
+        recomputing from raw vitals itself."""
+        payload = dict(self.vitals.derived(patient_id))
+        payload["patient_id"] = patient_id
+        payload["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+        topic = f"shtf/medical/derived/{patient_id}"
+        self.mqtt.publish(topic, json.dumps(payload), qos=1, retain=True)
 
     # -- Run ---------------------------------------------------------------
 

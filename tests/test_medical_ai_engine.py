@@ -96,6 +96,30 @@ class TestHandleVitals:
         })
         assert engine.vitals.latest("operator") == {}
 
+    def test_vitals_snapshot_triggers_derived_metrics_publish(self, engine):
+        engine._handle_vitals("shtf/medical/vitals/operator", {
+            "readings": [
+                {"reading_type": "bp_systolic", "value": 120, "unit": "mmHg"},
+                {"reading_type": "bp_diastolic", "value": 80, "unit": "mmHg"},
+            ]
+        })
+        derived_calls = [
+            c for c in engine.mqtt.published
+            if c[0] == "shtf/medical/derived/operator"
+        ]
+        assert len(derived_calls) == 1
+        topic, payload, qos, retain = derived_calls[0]
+        body = json.loads(payload)
+        assert body["map_mmhg"] == pytest.approx(93.3)
+        assert body["patient_id"] == "operator"
+        assert retain is True
+
+    def test_short_topic_does_not_publish_derived_metrics(self, engine):
+        engine._handle_vitals("shtf/medical/vitals", {"value": 1})
+        assert not any(
+            c[0].startswith("shtf/medical/derived/") for c in engine.mqtt.published
+        )
+
     def test_ecg_analysis_readings_flow_through_to_the_built_prompt(self, engine):
         # A realistic snapshot payload shaped like what medical_hub.py's
         # _collect_polar_h10_stream + ecg_analysis.py actually publish -
