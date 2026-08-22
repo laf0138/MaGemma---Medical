@@ -1,5 +1,5 @@
 # SPECTER Offline AI Library
-## Field Installer & Operations Guide  v1.0.0
+## Field Installer & Operations Guide  v1.2.0
 
 ---
 
@@ -144,7 +144,7 @@ mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t shtf/library
 ```
 
 ### Dashboard integration
-The SPECTER dashboard at 192.168.1.1:5000 includes an **AI LIBRARY** panel that sends queries to `shtf/library/ask` and displays answers via `shtf/library/response`.
+The SPECTER dashboard at `https://192.168.1.1` includes an **AI LIBRARY** panel that sends queries to `shtf/library/ask` and displays answers via `shtf/library/response`.
 
 ---
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -429,6 +430,29 @@ class TestSceneRegistryPersistence:
         path.write_text('{"scene_active": true, "casualties": [{"casualty_id": "C-1"}]}')
         r = SceneRegistry(persist_path=str(path))
         assert r.casualties == {}
+
+    @pytest.mark.parametrize("payload", [
+        "[]",
+        '{"format": 2, "casualties": {"C-1": null}}',
+        '{"format": 2, "casualties": {}, "counter": "NaN"}',
+    ])
+    def test_structurally_corrupt_json_never_crashes_startup(self, tmp_path, payload):
+        path = tmp_path / "scene.json"
+        path.write_text(payload)
+        registry = SceneRegistry(persist_path=str(path))
+        assert registry.casualties == {}
+        assert registry._counter == 0
+
+    def test_counter_is_never_lower_than_restored_ids(self, tmp_path):
+        path = tmp_path / "scene.json"
+        original = SceneRegistry(persist_path=str(path))
+        original.add_casualty()
+        original.add_casualty()
+        raw = json.loads(path.read_text())
+        raw["counter"] = 0
+        path.write_text(json.dumps(raw))
+        restored = SceneRegistry(persist_path=str(path))
+        assert restored.add_casualty().casualty_id == "C-3"
 
     def test_persist_writes_atomically_no_leftover_tmp_file(self, tmp_path):
         path = tmp_path / "scene.json"

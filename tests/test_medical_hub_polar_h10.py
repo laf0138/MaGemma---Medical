@@ -71,6 +71,7 @@ def _reset_fakes(monkeypatch):
     FakeHeartRate.instances.clear()
     monkeypatch.setattr(hub_mod, "PolarMeasurementData", FakePMD)
     monkeypatch.setattr(hub_mod, "HeartRate", FakeHeartRate)
+    monkeypatch.setattr(hub_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     yield
 
 

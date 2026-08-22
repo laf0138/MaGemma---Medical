@@ -11,10 +11,13 @@ the moment a trigger fired.
 
 These tests pin the documented fix so it can't regress silently.
 """
+import queue
+
 import numpy as np
 import pytest
 
-from services.specter_rx_ring_buffer import RingBuffer
+import services.specter_rx_ring_buffer as rx_mod
+from services.specter_rx_ring_buffer import RingBuffer, RXBufferService
 
 
 def make_buffer(maxlen: int) -> RingBuffer:
@@ -103,3 +106,62 @@ class TestRingBufferOversizedWrite:
         rb.write(np.array([1, 2, 3, 4, 5], dtype=np.int16))
         assert rb.filled is True
         np.testing.assert_array_equal(rb.read_all(), np.array([1, 2, 3, 4, 5], dtype=np.int16))
+
+
+class TestRXBufferService:
+    @pytest.fixture
+    def service(self, tmp_path):
+        return RXBufferService(
+            sample_rate=10, channels=1, buffer_seconds=1, post_seconds=1,
+            max_record_sec=3, queue_depth=2, output_dir=str(tmp_path),
+            trigger_file=str(tmp_path / "trigger"), mqtt_enabled=False,
+        )
+
+    def test_audio_level_handles_empty_and_full_scale(self):
+        assert RXBufferService._audio_level(np.array([], dtype=np.int16)) == 0.0
+        assert RXBufferService._audio_level(np.array([32767, -32768], dtype=np.int16)) == pytest.approx(1, rel=0.001)
+
+    def test_trigger_starts_recording_with_prebuffer(self, service, monkeypatch):
+        monkeypatch.setattr(rx_mod.time, "time", lambda: 100.0)
+        service.ring.write(np.array([1, 2, 3], dtype=np.int16))
+        service.trigger("manual-test")
+        assert service._recording is True
+        assert service._post_deadline == 101.0
+        assert service._last_trigger_reason == "manual-test"
+        np.testing.assert_array_equal(service._rec_frames[0], np.array([1, 2, 3], dtype=np.int16))
+
+    def test_trigger_file_is_consumed(self, service, monkeypatch):
+        reasons = []
+        monkeypatch.setattr(service, "trigger", reasons.append)
+        service.trigger_file.touch()
+        service._check_trigger_file()
+        assert reasons == ["trigger-file"]
+        assert service.trigger_file.exists() is False
+
+    def test_empty_queue_timeout_finalizes_without_lock_deadlock(self, service, monkeypatch):
+        service._recording = True
+        service._post_deadline = 1.0
+        service._rec_frames = [np.array([1], dtype=np.int16)]
+        calls = []
+
+        class StopAfterOneEmpty:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 1
+
+        service._stop_event = StopAfterOneEmpty()
+        monkeypatch.setattr(rx_mod.time, "time", lambda: 2.0)
+        monkeypatch.setattr(service._audio_q, "get", lambda timeout: (_ for _ in ()).throw(queue.Empty()))
+        def finalize(reason="post-timeout"):
+            acquired = service._record_lock.acquire(blocking=False)
+            assert acquired, "process loop called finalize while holding the record lock"
+            service._record_lock.release()
+            service._recording = False
+            calls.append(reason)
+
+        monkeypatch.setattr(service, "_finalize_recording", finalize)
+        service._process_loop()
+        assert calls == ["post-timeout"]

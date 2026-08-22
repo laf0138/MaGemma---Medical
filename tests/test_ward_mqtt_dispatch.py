@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+import ward.specter_ward as ward_mod
 from ward.specter_ward import WardService
 
 
@@ -35,7 +36,8 @@ def command_msg(cmd: str, **payload) -> FakeMsg:
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
+    monkeypatch.setattr(ward_mod, "_mqtt_credentials", lambda: ("ward-user", "ward-pass"))
     svc = WardService("mqtt-host", 1883, str(tmp_path / "ward.json"))
     svc.mqtt = FakeMQTT()
     return svc

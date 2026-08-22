@@ -11,6 +11,7 @@ import json
 import pytest
 import requests
 
+import medical.specter_medical_ai as medical_ai_mod
 from medical.specter_medical_ai import Config, MedicalAIEngine
 
 
@@ -37,6 +38,7 @@ class SyncThread:
 
 @pytest.fixture
 def engine(monkeypatch):
+    monkeypatch.setattr(medical_ai_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     cfg = Config(chroma_path="/does/not/exist")
     eng = MedicalAIEngine(cfg)
     eng.mqtt = FakeMQTT()

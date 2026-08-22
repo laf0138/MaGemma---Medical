@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "project": "SPECTER Monster Emergency Communications Command Center",
   "mqtt": {
     "broker": "192.168.1.1",
@@ -9,6 +9,7 @@
     "password": "specter-change-me",
     "services": {
       "trauma":      {"username": "specter-trauma",      "password": "specter-change-me"},
+      "ward":        {"username": "specter-ward",        "password": "specter-change-me"},
       "medical_ai":  {"username": "specter-medical-ai",  "password": "specter-change-me"},
       "medical_hub": {"username": "specter-medical-hub", "password": "specter-change-me"},
       "coordinator": {"username": "specter-coordinator", "password": "specter-change-me"},
@@ -49,8 +50,10 @@
     "gpsd_port": 2947
   },
   "dashboard": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5000,
+    "cookie_secure": true,
+    "external_url": "https://192.168.1.1",
     "update_interval_ms": 250
   },
   "thermal": {

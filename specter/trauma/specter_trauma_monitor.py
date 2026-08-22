@@ -24,7 +24,7 @@ import paho.mqtt.client as mqtt
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -42,17 +42,16 @@ MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read MQTT username/password from /etc/specter/specter.json (written
-    by the installer) if available, else fall back to the documented default."""
+    """Return the operator credential, failing closed if absent or default."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        return (
-            mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME),
-            mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD),
-        )
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    mqtt_cfg = cfg.get("mqtt", {})
+    username, password = mqtt_cfg.get("username"), mqtt_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError("operator MQTT credentials are missing or insecure")
+    return username, password
 # ---------------------------------------------------------------------------
 
 # ANSI. Category is carried by label AND symbol, never color alone - same rule
@@ -201,11 +200,11 @@ def render(scene):
     return "\n".join(lines)
 
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    if reason_code == 0:
         client.subscribe("shtf/trauma/scene", qos=1)
     else:
-        print(f"MQTT connect failed rc={rc}", file=sys.stderr)
+        print(f"MQTT connect failed: {reason_code}", file=sys.stderr)
 
 
 def on_message(client, userdata, msg):

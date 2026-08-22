@@ -32,8 +32,8 @@ VERSION = "1.2.0"
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "thermal" account:
 # it can only write shtf/system/thermal and shtf/system/alarm - no read
-# access at all. Fallback values below are used only when specter.json
-# has no mqtt.services.thermal entry (e.g. running outside a real install).
+# access at all. Runtime connections require the dedicated credential and
+# reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "thermal"
 MQTT_DEFAULT_USERNAME = "specter-thermal"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
@@ -50,6 +50,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [specter-thermal] %(message)s",
 )
 log = logging.getLogger("specter.thermal")
+
+
+def _mqtt_client(mqtt_module, client_id: str):
+    try:
+        return mqtt_module.Client(
+            mqtt_module.CallbackAPIVersion.VERSION2, client_id=client_id
+        )
+    except (AttributeError, TypeError):
+        return mqtt_module.Client(client_id=client_id)
 
 
 def load_config() -> dict:
@@ -121,39 +130,18 @@ class ThermalMonitor:
 
         try:
             raw_cfg = json.loads(CONFIG_PATH.read_text())
-            mqtt    = raw_cfg.get("mqtt", {})
-            service_cfg = mqtt.get("services", {}).get(MQTT_SERVICE_KEY)
-            self.broker   = mqtt.get("broker", "192.168.1.1")
-            self.port     = mqtt.get("port", 1883)
-            if service_cfg:
-                self.username = service_cfg.get("username", MQTT_DEFAULT_USERNAME)
-                self.password = service_cfg.get("password", MQTT_DEFAULT_PASSWORD)
-            else:
-                # No dedicated services.<key> entry - do NOT fall back to
-                # the broad "operator" credential (mqtt.username/
-                # password): that account has readwrite on shtf/# by
-                # design, so a missing config entry would silently hand
-                # this service far MORE privilege than its own
-                # least-privilege ACL grants, not less. Fall to this
-                # service's own documented default instead - on a real
-                # broker its password won't match the real (derived) one
-                # for this account, so the connection is rejected rather
-                # than silently succeeding with elevated access.
-                log.error(
-                    "specter.json has no mqtt.services.%s entry - using "
-                    "this service's own default credential (which will "
-                    "fail to authenticate against a real broker) instead "
-                    "of the broad operator account. Re-run "
-                    "deploy/install_specter.py.",
-                    MQTT_SERVICE_KEY,
-                )
-                self.username = MQTT_DEFAULT_USERNAME
-                self.password = MQTT_DEFAULT_PASSWORD
-        except Exception:
-            self.broker   = "192.168.1.1"
-            self.port     = 1883
-            self.username = MQTT_DEFAULT_USERNAME
-            self.password = MQTT_DEFAULT_PASSWORD
+        except Exception as exc:
+            raise RuntimeError("MQTT configuration is unreadable") from exc
+        if not isinstance(raw_cfg, dict):
+            raise RuntimeError("MQTT configuration must be a JSON object")
+        mqtt = raw_cfg.get("mqtt", {})
+        service_cfg = mqtt.get("services", {}).get(MQTT_SERVICE_KEY, {})
+        username, password = service_cfg.get("username"), service_cfg.get("password")
+        if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+            raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+        self.broker = mqtt.get("broker", "192.168.1.1")
+        self.port = mqtt.get("port", 1883)
+        self.username, self.password = username, password
 
     def _publish(self, topic: str, payload) -> None:
         if not self._client:
@@ -212,7 +200,7 @@ class ThermalMonitor:
     def run(self):
         try:
             import paho.mqtt.client as mqtt
-            client = mqtt.Client(client_id="specter_thermal")
+            client = _mqtt_client(mqtt, "specter_thermal")
             client.username_pw_set(self.username, self.password)
             client.connect(self.broker, self.port, 60)
             client.loop_start()

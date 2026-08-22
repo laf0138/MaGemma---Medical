@@ -7,7 +7,8 @@ network (or DNS-only/degraded RF backhaul) both `io` and `d3` came back
 `undefined` and the dashboard's core script failed outright.
 
 These two files are the same exact upstream builds vendored locally and
-served by `dashboard_server.py`'s Flask static route (`/dashboard/vendor/...`):
+served by `dashboard_server.py`'s authenticated vendor route
+(`/dashboard/vendor/...`):
 
 | File | Version | Upstream | License |
 |---|---|---|---|

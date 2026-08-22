@@ -10,9 +10,8 @@ leaked dashboard password (broad READ, many exposure points) would still
 let someone masquerade as the trauma service. So each service resolves
 its OWN username/password from specter.json's mqtt.services.<key> entry
 (written by the installer with a dedicated least-privilege Mosquitto ACL
-account), falling back to the shared "operator" credential, falling back
-to a documented per-service default - and every client calls
-username_pw_set() with the result before connecting.
+account). Missing or placeholder credentials fail closed, and every client
+calls username_pw_set() with the result before connecting.
 
 Where a module's client connects immediately on construction (LibraryMQTT,
 MQTTClient), paho's Client.connect/loop_start are patched to no-ops so the
@@ -23,6 +22,7 @@ username_pw_set having been applied to the client object, not on the
 import json
 import logging
 
+import paho.mqtt.client as paho_mqtt
 import pytest
 
 import core.mqtt_coordinator as coordinator_mod
@@ -48,6 +48,8 @@ class TestPerServiceDefaultUsernamesAreDistinct:
     def test_defaults_are_dedicated_not_shared(self):
         defaults = {
             "trauma": trauma_mod.MQTT_DEFAULT_USERNAME,
+            "ward": ward_mod.MQTT_DEFAULT_USERNAME,
+            "mesh": mesh_mod.MQTT_DEFAULT_USERNAME,
             "medical_ai": medical_ai_mod.MQTT_DEFAULT_USERNAME,
             "medical_hub": medical_hub_mod.MQTT_DEFAULT_USERNAME,
             "coordinator": coordinator_mod.MQTT_DEFAULT_USERNAME,
@@ -85,27 +87,19 @@ class TestTraumaCredentialsResolution:
         })
         assert trauma_mod._mqtt_credentials() == ("specter-trauma", "svc-pass")
 
-    def test_does_not_fall_back_to_broad_operator_credential_when_service_entry_missing(self, monkeypatch):
-        # A missing mqtt.services.trauma entry must NOT silently hand this
-        # service the broad "operator" credential (readwrite on shtf/# per
-        # its ACL) - that's a privilege escalation from a config omission,
-        # not a graceful degradation. It must fail toward this service's
-        # own default instead, which won't authenticate against a real
-        # broker's derived password - a loud, safe failure.
+    def test_rejects_flat_operator_fields_when_service_entry_missing(self, monkeypatch):
         write_specter_json(monkeypatch, {
             "mqtt": {"username": "specter-operator", "password": "operator-pass"}
         })
-        assert trauma_mod._mqtt_credentials() == (
-            trauma_mod.MQTT_DEFAULT_USERNAME, trauma_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            trauma_mod._mqtt_credentials()
 
-    def test_falls_back_to_hardcoded_default_when_config_missing(self, monkeypatch):
+    def test_rejects_missing_config(self, monkeypatch):
         import pathlib
         monkeypatch.setattr(pathlib.Path, "read_text",
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert trauma_mod._mqtt_credentials() == (
-            trauma_mod.MQTT_DEFAULT_USERNAME, trauma_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            trauma_mod._mqtt_credentials()
 
 
 class TestMedicalAICredentialsResolution:
@@ -115,69 +109,31 @@ class TestMedicalAICredentialsResolution:
         })
         assert medical_ai_mod._mqtt_credentials() == ("specter-medical-ai", "svc-pass")
 
-    def test_falls_back_to_hardcoded_default(self, monkeypatch):
+    def test_rejects_missing_config(self, monkeypatch):
         import pathlib
         monkeypatch.setattr(pathlib.Path, "read_text",
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert medical_ai_mod._mqtt_credentials() == (
-            medical_ai_mod.MQTT_DEFAULT_USERNAME, medical_ai_mod.MQTT_DEFAULT_PASSWORD,
-        )
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        assert medical_ai_mod._mqtt_credentials() == (
-            medical_ai_mod.MQTT_DEFAULT_USERNAME, medical_ai_mod.MQTT_DEFAULT_PASSWORD,
-        )
-
-
-class TestMedicalHubCredentialsResolution:
-    def test_service_entry_wins(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"services": {"medical_hub": {"username": "specter-medical-hub", "password": "svc-pass"}}}
-        })
-        assert medical_hub_mod._mqtt_credentials() == ("specter-medical-hub", "svc-pass")
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        assert medical_hub_mod._mqtt_credentials() == (
-            medical_hub_mod.MQTT_DEFAULT_USERNAME, medical_hub_mod.MQTT_DEFAULT_PASSWORD,
-        )
-
-    def test_falls_back_to_hardcoded_default_when_config_missing(self, monkeypatch):
-        import pathlib
-        monkeypatch.setattr(pathlib.Path, "read_text",
-                             lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert medical_hub_mod._mqtt_credentials() == (
-            medical_hub_mod.MQTT_DEFAULT_USERNAME, medical_hub_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            medical_ai_mod._mqtt_credentials()
 
 
 class TestWardCredentialsResolution:
     def test_service_entry_wins(self, monkeypatch):
         write_specter_json(monkeypatch, {
-            "mqtt": {"services": {"ward": {"username": "specter-ward", "password": "svc-pass"}}}
+            "mqtt": {"services": {
+                "ward": {"username": "specter-ward", "password": "svc-pass"}
+            }}
         })
         assert ward_mod._mqtt_credentials() == ("specter-ward", "svc-pass")
 
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        assert ward_mod._mqtt_credentials() == (
-            ward_mod.MQTT_DEFAULT_USERNAME, ward_mod.MQTT_DEFAULT_PASSWORD,
-        )
-
-    def test_falls_back_to_hardcoded_default_when_config_missing(self, monkeypatch):
+    def test_rejects_missing_config(self, monkeypatch):
         import pathlib
-        monkeypatch.setattr(pathlib.Path, "read_text",
-                             lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert ward_mod._mqtt_credentials() == (
-            ward_mod.MQTT_DEFAULT_USERNAME, ward_mod.MQTT_DEFAULT_PASSWORD,
+        monkeypatch.setattr(
+            pathlib.Path, "read_text",
+            lambda self: (_ for _ in ()).throw(FileNotFoundError()),
         )
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            ward_mod._mqtt_credentials()
 
 
 class TestMeshCredentialsResolution:
@@ -187,21 +143,19 @@ class TestMeshCredentialsResolution:
         })
         assert mesh_mod._mqtt_credentials() == ("specter-mesh", "svc-pass")
 
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
+    def test_rejects_broad_operator_credential_when_service_entry_missing(self, monkeypatch):
         write_specter_json(monkeypatch, {
             "mqtt": {"username": "specter-operator", "password": "operator-pass"}
         })
-        assert mesh_mod._mqtt_credentials() == (
-            mesh_mod.MQTT_DEFAULT_USERNAME, mesh_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            mesh_mod._mqtt_credentials()
 
-    def test_falls_back_to_hardcoded_default_when_config_missing(self, monkeypatch):
+    def test_rejects_missing_config(self, monkeypatch):
         import pathlib
         monkeypatch.setattr(pathlib.Path, "read_text",
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert mesh_mod._mqtt_credentials() == (
-            mesh_mod.MQTT_DEFAULT_USERNAME, mesh_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            mesh_mod._mqtt_credentials()
 
 
 class TestTraumaMonitorUsesOperatorRole:
@@ -209,20 +163,22 @@ class TestTraumaMonitorUsesOperatorRole:
     invoked CLI viewer, so it deliberately shares the broad operator
     credential rather than getting its own ACL account."""
 
-    def test_falls_back_to_documented_default_when_config_unreadable(self, monkeypatch):
+    def test_rejects_default_when_config_unreadable(self, monkeypatch):
         import pathlib
         monkeypatch.setattr(pathlib.Path, "read_text",
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
-        assert trauma_monitor_mod._mqtt_credentials() == (
-            trauma_monitor_mod.MQTT_DEFAULT_USERNAME,
-            trauma_monitor_mod.MQTT_DEFAULT_PASSWORD,
-        )
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            trauma_monitor_mod._mqtt_credentials()
 
     def test_uses_operator_credentials_from_config_file(self, tmp_path, monkeypatch):
         import pathlib
         content = '{"mqtt": {"username": "specter-operator", "password": "cpass"}}'
         monkeypatch.setattr(pathlib.Path, "read_text", lambda self: content)
         assert trauma_monitor_mod._mqtt_credentials() == ("specter-operator", "cpass")
+
+    def test_failed_v2_connection_reports_reason_without_callback_crash(self, capsys):
+        trauma_monitor_mod.on_connect(None, None, None, "Not authorized", None)
+        assert "MQTT connect failed: Not authorized" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -246,45 +202,20 @@ class TestMedicalAIEngineAuth:
         assert engine.mqtt.password == "tpass"
 
 
+class TestMeshRelayAuth:
+    def test_applies_credentials_from_helper(self, monkeypatch):
+        monkeypatch.setattr(mesh_mod, "_mqtt_credentials", lambda: ("tuser", "tpass"))
+        relay = mesh_mod.MeshRelayService("broker-host", 1883)
+        assert relay.mqtt.username == "tuser"
+        assert relay.mqtt.password == "tpass"
+
+
 class TestMedicalHubAuth:
     def test_applies_credentials_from_helper(self, monkeypatch):
         monkeypatch.setattr(medical_hub_mod, "_mqtt_credentials", lambda: ("tuser", "tpass"))
         hub = medical_hub_mod.MedicalHubBleCollector()
         assert hub.mqtt_client.username == "tuser"
         assert hub.mqtt_client.password == "tpass"
-
-
-class TestLibraryApiCredentialsResolution:
-    def test_service_entry_wins(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"services": {"library_api": {"username": "specter-library-api", "password": "svc-pass"}}}
-        })
-        assert library_mod._mqtt_credentials() == ("specter-library-api", "svc-pass")
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        assert library_mod._mqtt_credentials() == (
-            library_mod.MQTT_DEFAULT_USERNAME, library_mod.MQTT_DEFAULT_PASSWORD,
-        )
-
-
-class TestRxRingBufferCredentialsResolution:
-    def test_service_entry_wins(self, monkeypatch):
-        import pathlib
-        write_specter_json(monkeypatch, {
-            "mqtt": {"services": {"rx_buffer": {"username": "specter-rx-buffer", "password": "svc-pass"}}}
-        })
-        assert rx_mod._mqtt_credentials() == ("specter-rx-buffer", "svc-pass")
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        write_specter_json(monkeypatch, {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        assert rx_mod._mqtt_credentials() == (
-            rx_mod.MQTT_DEFAULT_USERNAME, rx_mod.MQTT_DEFAULT_PASSWORD,
-        )
 
 
 class TestLibraryMQTTAuth:
@@ -334,23 +265,17 @@ class TestMqttCoordinatorAuthResolution:
         assert c.username == "specter-coordinator"
         assert c.password == "svc-pass"
 
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        # Same reasoning as trauma's equivalent test: a missing
-        # mqtt.services.coordinator entry must not silently grant the
-        # broad readwrite "operator" credential - the coordinator's own
-        # ACL is broad-READ only, no write.
+    def test_rejects_flat_operator_fields(self, monkeypatch):
         monkeypatch.setattr(coordinator_mod, "load_config", lambda: {
             "mqtt": {"username": "specter-operator", "password": "operator-pass"}
         })
-        c = coordinator_mod.MQTTCoordinator()
-        assert c.username == coordinator_mod.MQTT_DEFAULT_USERNAME
-        assert c.password == coordinator_mod.MQTT_DEFAULT_PASSWORD
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            coordinator_mod.MQTTCoordinator()
 
-    def test_falls_back_to_documented_default(self, monkeypatch):
+    def test_rejects_missing_service_credentials(self, monkeypatch):
         monkeypatch.setattr(coordinator_mod, "load_config", lambda: {"mqtt": {}})
-        c = coordinator_mod.MQTTCoordinator()
-        assert c.username == coordinator_mod.MQTT_DEFAULT_USERNAME
-        assert c.password == coordinator_mod.MQTT_DEFAULT_PASSWORD
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            coordinator_mod.MQTTCoordinator()
 
 
 class TestSdrControlAuthResolution:
@@ -362,19 +287,10 @@ class TestSdrControlAuthResolution:
         assert svc.username == "specter-sdr-control"
         assert svc.password == "svc-pass"
 
-    def test_falls_back_to_documented_default(self, monkeypatch):
+    def test_rejects_missing_service_credentials(self, monkeypatch):
         monkeypatch.setattr(sdr_mod, "load_config", lambda: {})
-        svc = sdr_mod.SDRControlService()
-        assert svc.username == sdr_mod.MQTT_DEFAULT_USERNAME
-        assert svc.password == sdr_mod.MQTT_DEFAULT_PASSWORD
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, monkeypatch):
-        monkeypatch.setattr(sdr_mod, "load_config", lambda: {
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        })
-        svc = sdr_mod.SDRControlService()
-        assert svc.username == sdr_mod.MQTT_DEFAULT_USERNAME
-        assert svc.password == sdr_mod.MQTT_DEFAULT_PASSWORD
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            sdr_mod.SDRControlService()
 
 
 class TestThermalMonitorAuthResolution:
@@ -389,30 +305,25 @@ class TestThermalMonitorAuthResolution:
         assert mon.username == "specter-thermal"
         assert mon.password == "svc-pass"
 
-    def test_falls_back_to_documented_default_when_config_missing(self, tmp_path, monkeypatch):
+    def test_rejects_missing_config(self, tmp_path, monkeypatch):
         monkeypatch.setattr(thermal_mod, "CONFIG_PATH", tmp_path / "does_not_exist.json")
         monkeypatch.setattr(thermal_mod, "load_config", lambda: {})
-        mon = thermal_mod.ThermalMonitor()
-        assert mon.username == thermal_mod.MQTT_DEFAULT_USERNAME
-        assert mon.password == thermal_mod.MQTT_DEFAULT_PASSWORD
-
-    def test_does_not_fall_back_to_broad_operator_credential(self, tmp_path, monkeypatch):
-        cfg_file = tmp_path / "specter.json"
-        cfg_file.write_text(json.dumps({
-            "mqtt": {"username": "specter-operator", "password": "operator-pass"}
-        }))
-        monkeypatch.setattr(thermal_mod, "CONFIG_PATH", cfg_file)
-        monkeypatch.setattr(thermal_mod, "load_config", lambda: {})
-        mon = thermal_mod.ThermalMonitor()
-        assert mon.username == thermal_mod.MQTT_DEFAULT_USERNAME
-        assert mon.password == thermal_mod.MQTT_DEFAULT_PASSWORD
+        with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
+            thermal_mod.ThermalMonitor()
 
 
 class TestDashboardMQTTAuth:
-    def test_defaults_when_not_specified(self):
-        m = dashboard_mod.DashboardMQTT(broker="192.168.1.1", port=1883)
-        assert m.username == dashboard_mod.MQTT_DEFAULT_USERNAME
-        assert m.password == dashboard_mod.MQTT_DEFAULT_PASSWORD
+    def test_missing_credentials_are_rejected(self):
+        with pytest.raises(TypeError):
+            dashboard_mod.DashboardMQTT(broker="192.168.1.1", port=1883)
+
+    def test_placeholder_credentials_are_rejected(self):
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            dashboard_mod.DashboardMQTT(
+                broker="192.168.1.1", port=1883,
+                username=dashboard_mod.MQTT_DEFAULT_USERNAME,
+                password=dashboard_mod.MQTT_DEFAULT_PASSWORD,
+            )
 
     def test_explicit_credentials_are_stored(self):
         m = dashboard_mod.DashboardMQTT(
@@ -422,10 +333,10 @@ class TestDashboardMQTTAuth:
 
 
 # ---------------------------------------------------------------------------
-# _mqtt_client() paho-mqtt 1.x/2.x compatibility fallback
+# _mqtt_client() paho-mqtt 2.x API and 1.x compatibility fallback
 #
 # On paho-mqtt 1.x, mqtt.CallbackAPIVersion does not exist, so
-# `mqtt.CallbackAPIVersion.VERSION1` raises AttributeError before Client()
+# `mqtt.CallbackAPIVersion.VERSION2` raises AttributeError before Client()
 # is even reached. The except branch used to call _mqtt_client() again
 # instead of falling back to the old-style constructor - since the
 # AttributeError is deterministic (the attribute either exists or it
@@ -456,12 +367,15 @@ class _Paho1xStubModule:
 
 
 class TestMqttClientCompatFallback:
-    MODULES = [trauma_mod, trauma_monitor_mod, medical_ai_mod, medical_hub_mod]
+    MODULES = [
+        trauma_mod, trauma_monitor_mod, ward_mod, mesh_mod, medical_ai_mod,
+        medical_hub_mod,
+    ]
 
     @pytest.mark.parametrize("mod", MODULES, ids=lambda m: m.__name__)
     def test_returns_client_on_current_paho_version(self, mod):
         client = mod._mqtt_client("test-client-id")
-        assert client is not None
+        assert client.callback_api_version == paho_mqtt.CallbackAPIVersion.VERSION2
 
     @pytest.mark.parametrize("mod", MODULES, ids=lambda m: m.__name__)
     def test_falls_back_without_recursing_on_paho_1x(self, mod, monkeypatch):
@@ -476,3 +390,10 @@ class TestMqttClientCompatFallback:
         client = mod._mqtt_client("test-client-id")
         assert isinstance(client, _Paho1xStubClient)
         assert client.client_id == "test-client-id"
+
+    @pytest.mark.parametrize(
+        "mod", [coordinator_mod, sdr_mod, thermal_mod], ids=lambda m: m.__name__
+    )
+    def test_core_helpers_use_current_callback_api(self, mod):
+        client = mod._mqtt_client(paho_mqtt, "test-client-id")
+        assert client.callback_api_version == paho_mqtt.CallbackAPIVersion.VERSION2

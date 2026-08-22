@@ -38,7 +38,7 @@ import requests
 from flask import Flask, jsonify, request
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-VERSION         = "1.0.0"
+VERSION         = "1.2.0"
 CONFIG_PATH     = Path("/etc/specter/library.json")
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST",        "http://localhost:11434")
 KIWIX_URL       = os.environ.get("KIWIX_URL",          "http://localhost:8080")
@@ -50,47 +50,24 @@ API_PORT        = int(os.environ.get("LIBRARY_API_PORT", "5001"))
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "library_api"
 # account: it can only read shtf/library/ask and write its own response/
-# status topics. Fallback values below are used only when specter.json
-# has no mqtt.services.library_api entry (e.g. running outside a real
-# install).
+# status topics. Runtime connections require the dedicated credential and
+# reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "library_api"
 MQTT_DEFAULT_USERNAME = "specter-library-api"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+    """Return the dedicated service credential, failing closed if absent."""
     try:
         specter_cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = specter_cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
-        if service_cfg:
-            return (
-                service_cfg.get("username", MQTT_DEFAULT_USERNAME),
-                service_cfg.get("password", MQTT_DEFAULT_PASSWORD),
-            )
-        # No dedicated services.<key> entry - do NOT fall back to the
-        # broad "operator" credential (mqtt.username/password): that
-        # account has readwrite on shtf/# by design (see
-        # deploy/install_specter.py's ACL for it), so a missing config
-        # entry would silently hand this service far MORE privilege than
-        # its own least-privilege ACL grants, not less. Fall to this
-        # service's own documented default instead - on a real broker its
-        # password won't match the real (derived) one for this account,
-        # so the connection is rejected rather than silently succeeding
-        # with elevated access. Re-run the installer to fix this properly.
-        log.error(
-            "specter.json has no mqtt.services.%s entry - using this "
-            "service's own default credential (which will fail to "
-            "authenticate against a real broker) instead of the broad "
-            "operator account. Re-run deploy/install_specter.py.",
-            MQTT_SERVICE_KEY,
-        )
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    service_cfg = specter_cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 
 TOPIC_ASK       = "shtf/library/ask"
 TOPIC_RESPONSE  = "shtf/library/response"
@@ -424,7 +401,13 @@ class LibraryMQTT:
     def _connect(self):
         try:
             import paho.mqtt.client as mqtt
-            client = mqtt.Client(client_id="specter_library_api")
+            try:
+                client = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION2,
+                    client_id="specter_library_api",
+                )
+            except (AttributeError, TypeError):
+                client = mqtt.Client(client_id="specter_library_api")
             client.username_pw_set(*_mqtt_credentials())
             client.on_connect = self._on_connect
             client.on_message = self._on_message
@@ -435,8 +418,8 @@ class LibraryMQTT:
         except Exception as e:
             log.warning("Library MQTT unavailable: %s", e)
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             client.subscribe(TOPIC_ASK)
             log.info("Subscribed to %s", TOPIC_ASK)
 

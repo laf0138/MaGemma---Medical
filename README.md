@@ -8,11 +8,9 @@ center) lives in `specter/` — see `specter/README.md` and
 
 ```bash
 pip install -r requirements-dev.txt
-pytest
+pytest --cov=specter --cov-report=term-missing --cov-fail-under=65
 ```
 
-Tests currently cover the trauma/triage decision logic
-(`specter/trauma/specter_trauma.py`) and the Bluetooth vitals-device
-parsers (`specter/medical/specter_medical_hub.py`) — the two areas with the
-highest patient-safety impact per `specter/docs/MANUAL.md` Part 7. See that
-doc's "Known Gaps" section for what else still needs coverage.
+CI enforces the measured coverage floor. Direct dependencies are declared in
+`requirements-dev.in`; `requirements-dev.txt` pins the complete resolved
+development/test graph used by CI.

@@ -91,50 +91,24 @@ MQTT_STATUS_INTERVAL    = 10       # seconds between heartbeats
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "rx_buffer"
 # account: it can only read shtf/rx/trigger and write its own status/
-# event/recording/alarm topics. Fallback values below are used only when
-# specter.json has no mqtt.services.rx_buffer entry (e.g. running outside
-# a real install).
+# event/recording/alarm topics. Runtime connections require the dedicated
+# credential and reject the installer's placeholder password.
 MQTT_SERVICE_KEY        = "rx_buffer"
 MQTT_DEFAULT_USERNAME   = "specter-rx-buffer"
 MQTT_DEFAULT_PASSWORD   = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+    """Return the dedicated service credential, failing closed if absent."""
     try:
         cfg = json.loads((CONFIG_DIR / "specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
-        if service_cfg:
-            return (
-                service_cfg.get("username", MQTT_DEFAULT_USERNAME),
-                service_cfg.get("password", MQTT_DEFAULT_PASSWORD),
-            )
-        # No dedicated services.<key> entry - do NOT fall back to the
-        # broad "operator" credential (mqtt.username/password): that
-        # account has readwrite on shtf/# by design (see
-        # deploy/install_specter.py's ACL for it), so a missing config
-        # entry would silently hand this service far MORE privilege than
-        # its own least-privilege ACL grants, not less. Fall to this
-        # service's own documented default instead - on a real broker its
-        # password won't match the real (derived) one for this account,
-        # so the connection is rejected rather than silently succeeding
-        # with elevated access. Re-run the installer to fix this properly.
-        # This module has no module-level `logger` (it uses a per-instance
-        # self.log set up inside main(), which doesn't exist yet here) -
-        # get the same named logger directly rather than introducing one.
-        logging.getLogger("specter.rx_ring_buffer").error(
-            "specter.json has no mqtt.services.%s entry - using this "
-            "service's own default credential (which will fail to "
-            "authenticate against a real broker) instead of the broad "
-            "operator account. Re-run deploy/install_specter.py.",
-            MQTT_SERVICE_KEY,
-        )
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 
 TOPIC_STATUS     = "shtf/rx/status"
 TOPIC_EVENT      = "shtf/rx/event"
@@ -241,7 +215,13 @@ class MQTTClient:
                              "Install with: pip install paho-mqtt")
             return
 
-        client = mqtt.Client(client_id="specter_rx_ring_buffer")
+        try:
+            client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id="specter_rx_ring_buffer",
+            )
+        except (AttributeError, TypeError):
+            client = mqtt.Client(client_id="specter_rx_ring_buffer")
         client.username_pw_set(*_mqtt_credentials())
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
@@ -254,17 +234,25 @@ class MQTTClient:
             self.log.warning("MQTT connect failed (%s:%d): %s — running without MQTT",
                              self.broker, self.port, exc)
 
-    def _on_connect(self, client, userdata, flags, rc) -> None:
-        if rc == 0:
+    def _on_connect(
+        self, client, userdata, flags, reason_code, properties=None,
+    ) -> None:
+        if reason_code == 0:
             self._connected = True
             self.log.info("MQTT connected to %s:%d", self.broker, self.port)
             client.subscribe(TOPIC_TRIGGER)
         else:
-            self.log.warning("MQTT connect refused (rc=%d)", rc)
+            self.log.warning("MQTT connect refused: %s", reason_code)
 
-    def _on_disconnect(self, client, userdata, rc) -> None:
+    def _on_disconnect(
+        self, client, userdata, disconnect_flags_or_reason_code,
+        reason_code=None, properties=None,
+    ) -> None:
+        reason_code = (
+            disconnect_flags_or_reason_code if reason_code is None else reason_code
+        )
         self._connected = False
-        self.log.warning("MQTT disconnected (rc=%d) — will auto-reconnect", rc)
+        self.log.warning("MQTT disconnected (%s) — will auto-reconnect", reason_code)
 
     def _on_message(self, client, userdata, msg) -> None:
         if msg.topic == TOPIC_TRIGGER:
@@ -593,10 +581,16 @@ class RXBufferService:
                 chunk = self._audio_q.get(timeout=0.5)
             except queue.Empty:
                 with self._record_lock:
-                    if (self._recording
-                            and self._post_deadline
-                            and time.time() >= self._post_deadline):
-                        self._finalize_recording()
+                    timed_out = bool(
+                        self._recording
+                        and self._post_deadline
+                        and time.time() >= self._post_deadline
+                    )
+                # _finalize_recording acquires _record_lock itself. Calling it
+                # inside the block above deadlocked the worker whenever a
+                # recording timed out during an empty audio queue.
+                if timed_out:
+                    self._finalize_recording()
                 continue
 
             # Feed ring buffer

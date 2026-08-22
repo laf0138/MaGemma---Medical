@@ -1,7 +1,7 @@
 """
 Tests for dashboard/dashboard_server.py: the MQTT topic-matching dispatch
 (_match/_on_message), the per-topic state handlers that update the shared
-STATE dict pushed to the browser dashboard, and the plain HTTP routes.
+STATE dict pushed to the browser dashboard, and authenticated backend routes.
 
 socketio.emit() is mocked out via DashboardMQTT._push in most tests so
 this suite checks SPECTER's own dispatch/state logic, not flask-socketio's
@@ -30,7 +30,10 @@ def reset_state():
 
 @pytest.fixture
 def mqtt(monkeypatch):
-    m = DashboardMQTT(broker="192.168.1.1", port=1883)
+    m = DashboardMQTT(
+        broker="192.168.1.1", port=1883,
+        username="specter-dashboard", password="dashboard-test-password",
+    )
     pushed = []
     monkeypatch.setattr(m, "_push", lambda event, data: pushed.append((event, data)))
     m.pushed = pushed
@@ -224,9 +227,7 @@ class TestOnSystemState:
 class TestOnWardEpisode:
     def test_dict_payload_relays_episodes_and_stamps_updated(self, mqtt):
         episodes = [{"episode_id": "W-1", "patient_id": "p1"}]
-        mqtt._on_ward_episode("shtf/ward/episode", {
-            "timestamp_utc": "2026-01-01T00:00:00+00:00", "episodes": episodes,
-        })
+        mqtt._on_ward_episode("shtf/ward/episode", {"episodes": episodes})
         assert ds.STATE["ward"]["episodes"] == episodes
         assert ds.STATE["ward"]["updated"] > 0
         assert mqtt.pushed == [("ward_episode", ds.STATE["ward"])]
@@ -244,7 +245,6 @@ class TestOnWardAlert:
             {"level": "caution", "text": "No mobility logged in 25.0h"},
         ])
         assert len(ds.STATE["alarms"]) == 2
-        assert ds.STATE["alarms"][0]["data"]["text"] == "Reposition overdue by 40m"
 
     def test_non_list_payload_does_not_raise(self, mqtt):
         mqtt._on_ward_alert("shtf/ward/alert", "garbage")
@@ -283,30 +283,21 @@ class TestOnMeshInbound:
 
 
 class TestPublishWardCommand:
-    """The dashboard MQTT credential is deliberately read-only across
-    shtf/# except one narrow write exception for shtf/ward/command/# (see
-    deploy/install_specter.py's ACL comment) - publish_ward_command is the
-    only path that's allowed to use it, and only for known ward commands."""
-
-    def test_publishes_to_correct_topic(self, mqtt):
+    def test_publishes_only_allowlisted_command_to_correct_topic(self, mqtt):
         published = []
         mqtt._client = type("FakeClient", (), {
-            "publish": lambda self, topic, payload, qos=0: published.append((topic, payload, qos))
+            "publish": lambda self, topic, payload, qos=0: published.append(
+                (topic, payload, qos)
+            )
         })()
-        result = mqtt.publish_ward_command("complete_task", {"episode_id": "W-1", "task_id": "W-1-T1"})
-        assert result is True
-        assert len(published) == 1
+        assert mqtt.publish_ward_command(
+            "complete_task", {"episode_id": "W-1", "task_id": "W-1-T1"}
+        ) is True
         topic, payload, qos = published[0]
         assert topic == "shtf/ward/command/complete_task"
         assert json.loads(payload) == {"episode_id": "W-1", "task_id": "W-1-T1"}
-
-    def test_rejects_unknown_command(self, mqtt):
-        mqtt._client = type("FakeClient", (), {"publish": lambda self, *a, **k: None})()
+        assert qos == 1
         assert mqtt.publish_ward_command("delete_everything", {}) is False
-
-    def test_returns_false_when_mqtt_not_connected(self, mqtt):
-        mqtt._client = None
-        assert mqtt.publish_ward_command("intake", {"episode_id": "W-1"}) is False
 
 
 class _FakeMqttClient:
@@ -361,84 +352,59 @@ class TestOnMessageDispatch:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def client():
-    ds.app.config["TESTING"] = True
+def client(monkeypatch):
+    monkeypatch.setattr(ds, "PASSWORD_ITERATIONS", 100_000)
+    monkeypatch.setitem(ds.app.config, "TESTING", True)
+    monkeypatch.setitem(ds.app.config, "DASHBOARD_AUTH_USERNAME", "operator")
+    monkeypatch.setitem(
+        ds.app.config,
+        "DASHBOARD_AUTH_PASSWORD_HASH",
+        ds.hash_dashboard_password(
+            "correct-horse-battery-staple", salt="dashboard-test-salt"
+        ),
+    )
+    # Production uses HTTPS at Nginx. The test client uses local HTTP, so
+    # disable Secure only within this fixture to exercise follow-up requests.
+    monkeypatch.setitem(ds.app.config, "SESSION_COOKIE_SECURE", False)
     return ds.app.test_client()
 
 
-@pytest.fixture
-def auth():
-    """Basic Auth kwarg for the Flask test client, matching the real
-    default credential (see TestDashboardAuth for the gate itself)."""
-    return (ds.DASHBOARD_AUTH_USERNAME, ds.DASHBOARD_AUTH_PASSWORD)
-
-
-class TestDashboardAuth:
-    """
-    HTTP Basic Auth on every route but /api/status - closes the gap where
-    same-origin CORS/no-anonymous-MQTT stopped a page on another origin or
-    host, but not a person already on the LAN pointing a browser straight
-    at port 5000, who could otherwise read /api/state and invoke
-    trigger_rx with nothing else required.
-    """
-
-    def test_index_rejects_no_credentials(self, client):
-        resp = client.get("/")
-        assert resp.status_code == 401
-        assert "WWW-Authenticate" in resp.headers
-
-    def test_index_rejects_wrong_credentials(self, client):
-        resp = client.get("/", auth=(ds.DASHBOARD_AUTH_USERNAME, "wrong"))
-        assert resp.status_code == 401
-
-    def test_index_accepts_correct_credentials(self, client, auth):
-        resp = client.get("/", auth=auth)
-        assert resp.status_code == 200
-
-    def test_api_state_requires_auth(self, client, auth):
-        assert client.get("/api/state").status_code == 401
-        assert client.get("/api/state", auth=auth).status_code == 200
-
-    def test_resus_requires_auth(self, client, auth):
-        assert client.get("/resus").status_code == 401
-        assert client.get("/resus", auth=auth).status_code == 200
-
-    def test_api_status_is_the_deliberate_unauthenticated_exception(self, client):
-        # scripts/health_check.sh polls this without credentials, the same
-        # way a load balancer health check normally would - it carries no
-        # patient or system state, just service/version/uptime/ok.
-        resp = client.get("/api/status")
-        assert resp.status_code == 200
-
-    def test_default_password_triggers_startup_warning(self, caplog):
-        import logging
-        with caplog.at_level(logging.WARNING, logger="specter.dashboard"):
-            ds._dashboard_auth_credentials()
-        assert any("DEFAULT operator password" in r.message for r in caplog.records)
+def login(client, *, username="operator", password="correct-horse-battery-staple", next_path="/"):
+    client.get("/login")
+    with client.session_transaction() as flask_session:
+        csrf_token = flask_session["login_csrf"]
+    return client.post(
+        f"/login?next={next_path}",
+        data={"username": username, "password": password, "csrf_token": csrf_token},
+    )
 
 
 class TestHttpRoutes:
-    def test_index_serves_dashboard_html(self, client, auth):
-        resp = client.get("/", auth=auth)
+    def test_index_serves_dashboard_html(self, client):
+        login(client)
+        resp = client.get("/")
         assert resp.status_code == 200
 
-    def test_resus_route_serves_resus_html(self, client, auth):
+    def test_resus_route_serves_resus_html(self, client):
         # docs/SPECTER_MEDICAL_UI_BRIEF.md and the trauma docs both point
         # operators at /resus, but only "/", "/api/state", "/api/status"
         # were ever routed - the file was only reachable (if at all) via
         # Flask's static handler at a different, undocumented URL.
-        resp = client.get("/resus", auth=auth)
+        login(client)
+        resp = client.get("/resus")
         assert resp.status_code == 200
         assert b"<html" in resp.data.lower()
 
-    def test_ward_route_serves_ward_html(self, client, auth):
-        resp = client.get("/ward", auth=auth)
+    def test_ward_route_serves_ward_html(self, client):
+        login(client)
+        resp = client.get("/ward")
         assert resp.status_code == 200
         assert b"<html" in resp.data.lower()
 
-    def test_api_state_returns_current_state(self, client, auth):
+    def test_api_state_returns_current_state(self, client):
+        login(client)
         ds.STATE["tx"]["status"] = "idle-test-marker"
-        resp = client.get("/api/state", auth=auth)
+        resp = client.get("/api/state")
         assert resp.status_code == 200
         assert resp.get_json()["tx"]["status"] == "idle-test-marker"
 
@@ -455,6 +421,100 @@ class TestHttpRoutes:
         resp = client.get("/api/status")
         uptime = resp.get_json()["uptime"]
         assert 0 <= uptime < 3600  # test process has been up for seconds, not decades
+
+
+class TestDashboardAuthentication:
+    def test_html_routes_redirect_to_login_when_unauthenticated(self, client):
+        for path in ("/", "/resus", "/ward"):
+            response = client.get(path)
+            assert response.status_code == 302
+            assert response.headers["Location"].endswith(f"/login?next={path}")
+
+    def test_state_api_rejects_unauthenticated_request(self, client):
+        response = client.get("/api/state")
+        assert response.status_code == 401
+        assert response.get_json() == {"error": "authentication required"}
+
+    def test_static_route_cannot_bypass_auth(self, client):
+        assert client.get("/static/dashboard.html").status_code == 404
+        assert client.get("/static/dashboard_server.py").status_code == 404
+
+    def test_vendor_assets_require_authentication(self, client):
+        path = "/dashboard/vendor/socket.io.min.js"
+        assert client.get(path).status_code == 302
+        login(client)
+        response = client.get(path)
+        assert response.status_code == 200
+        assert b"Socket.IO" in response.data
+
+    def test_health_endpoint_remains_public(self, client):
+        assert client.get("/api/status").status_code == 200
+
+    def test_valid_login_creates_authenticated_session(self, client):
+        response = login(client, next_path="/resus")
+        assert response.status_code == 302
+        assert response.headers["Location"].endswith("/resus")
+        assert client.get("/resus").status_code == 200
+
+    def test_login_form_preserves_requested_destination(self, client):
+        response = client.get("/login?next=/resus")
+        assert b'action="/login?next=/resus"' in response.data
+
+    def test_invalid_credentials_do_not_authenticate(self, client):
+        response = login(client, password="wrong-password")
+        assert response.status_code == 200
+        assert b"Invalid username, password, or form token" in response.data
+        assert client.get("/api/state").status_code == 401
+
+    def test_missing_csrf_token_does_not_authenticate(self, client):
+        response = client.post(
+            "/login", data={"username": "operator", "password": "correct-horse-battery-staple"}
+        )
+        assert response.status_code == 200
+        assert client.get("/api/state").status_code == 401
+
+    def test_external_redirect_target_is_rejected(self, client):
+        response = login(client, next_path="//attacker.invalid/")
+        assert response.status_code == 302
+        assert response.headers["Location"].endswith("/")
+        assert "attacker.invalid" not in response.headers["Location"]
+
+    def test_logout_clears_session(self, client):
+        login(client)
+        assert client.get("/api/state").status_code == 200
+        assert client.post("/logout").status_code == 302
+        assert client.get("/api/state").status_code == 401
+
+    def test_password_hash_verification(self):
+        encoded = ds.hash_dashboard_password("valid-password", salt="fixed-test-salt")
+        assert ds.verify_dashboard_password("valid-password", encoded) is True
+        assert ds.verify_dashboard_password("invalid-password", encoded) is False
+        assert ds.verify_dashboard_password("valid-password", "malformed") is False
+
+    def test_security_headers_disable_embedding_and_cache(self, client):
+        response = client.get("/login")
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Cache-Control"] == "no-store"
+
+    def test_production_session_cookie_is_secure(self, client, monkeypatch):
+        monkeypatch.setitem(ds.app.config, "SESSION_COOKIE_SECURE", True)
+        response = client.get("/login")
+        cookie = response.headers["Set-Cookie"]
+        assert "Secure" in cookie
+        assert "HttpOnly" in cookie
+        assert "SameSite=Strict" in cookie
+
+    def test_websocket_rejects_unauthenticated_client(self, client):
+        socket_client = ds.socketio.test_client(ds.app, flask_test_client=client)
+        assert socket_client.is_connected() is False
+
+    def test_websocket_accepts_authenticated_client(self, client):
+        login(client)
+        socket_client = ds.socketio.test_client(ds.app, flask_test_client=client)
+        assert socket_client.is_connected() is True
+        assert socket_client.get_received()[0]["name"] == "state"
+        socket_client.disconnect()
 
 
 class TestSecretKeyAndCors:

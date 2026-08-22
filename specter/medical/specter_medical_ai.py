@@ -15,7 +15,7 @@ Model: MedGemma 4B Q4_K_M via Ollama (~1.9GB, 40-50 tok/s, 3-5s response)
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.0.0
+Version: 1.2.0
 """
 
 import os
@@ -45,7 +45,7 @@ from medical.clinical_scores import (
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -58,47 +58,26 @@ def _mqtt_client(client_id: str = ""):
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "medical_ai" account:
 # it can only read the vitals/query/profile topics and write its own
-# diagnosis/status topics. Fallback values below are used only when
-# specter.json has no mqtt.services.medical_ai entry (e.g. running outside
-# a real install).
+# diagnosis/status topics. Runtime connections require the dedicated
+# credential and reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "medical_ai"
 MQTT_DEFAULT_USERNAME = "specter-medical-ai"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
-def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+def _mqtt_credentials() -> tuple[str, str]:
+    """Return only this service's dedicated credential, or fail closed."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
-        if service_cfg:
-            return (
-                service_cfg.get("username", MQTT_DEFAULT_USERNAME),
-                service_cfg.get("password", MQTT_DEFAULT_PASSWORD),
-            )
-        # No dedicated services.<key> entry - do NOT fall back to the
-        # broad "operator" credential (mqtt.username/password): that
-        # account has readwrite on shtf/# by design (see
-        # deploy/install_specter.py's ACL for it), so a missing config
-        # entry would silently hand this service far MORE privilege than
-        # its own least-privilege ACL grants, not less. Fall to this
-        # service's own documented default instead - on a real broker its
-        # password won't match the real (derived) one for this account,
-        # so the connection is rejected rather than silently succeeding
-        # with elevated access. Re-run the installer to fix this properly.
-        logger.error(
-            "specter.json has no mqtt.services.%s entry - using this "
-            "service's own default credential (which will fail to "
-            "authenticate against a real broker) instead of the broad "
-            "operator account. Re-run deploy/install_specter.py.",
-            MQTT_SERVICE_KEY,
-        )
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    if not isinstance(cfg, dict):
+        raise RuntimeError("MQTT configuration must be a JSON object")
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -820,8 +799,8 @@ class MedicalAIEngine:
 
     # -- MQTT lifecycle ----------------------------------------------------
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             self.connected = True
             logger.info("MQTT connected to %s:%s", self.cfg.mqtt_host, self.cfg.mqtt_port)
             client.subscribe(self.TOPIC_VITALS, qos=1)
@@ -830,12 +809,18 @@ class MedicalAIEngine:
             self._publish_status("online")
         else:
             self.connected = False
-            logger.error("MQTT connection failed, rc=%s", rc)
+            logger.error("MQTT connection failed: %s", reason_code)
 
-    def _on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(
+        self, client, userdata, disconnect_flags_or_reason_code,
+        reason_code=None, properties=None,
+    ):
+        reason_code = (
+            disconnect_flags_or_reason_code if reason_code is None else reason_code
+        )
         self.connected = False
-        if rc != 0:
-            logger.warning("MQTT disconnected unexpectedly, rc=%s", rc)
+        if reason_code != 0:
+            logger.warning("MQTT disconnected unexpectedly: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
@@ -1135,7 +1120,7 @@ def main() -> None:
         return
 
     logger.info("=" * 60)
-    logger.info("SPECTER Medical AI Engine v1.0.0")
+    logger.info("SPECTER Medical AI Engine v1.2.0")
     logger.info("MQTT:   %s:%s", cfg.mqtt_host, cfg.mqtt_port)
     logger.info("Ollama: %s (model=%s)", cfg.ollama_host, cfg.model)
     logger.info("Kiwix:  %s", cfg.kiwix_host)

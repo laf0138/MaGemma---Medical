@@ -42,6 +42,9 @@ nav button.on{color:var(--phos);background:var(--panel-2);box-shadow:inset 0 -2p
   display:flex;flex-direction:column;justify-content:center;min-width:190px}
 .brand .name{font-size:16px;letter-spacing:.3em}
 .brand .meta{font-size:9px;color:var(--dimmer);letter-spacing:.1em;margin-top:2px}
+.brand form{margin-top:4px}.brand .logout{min-height:28px;padding:2px 8px;background:none;
+  border:1px solid var(--dimmer);color:var(--dim);font-size:9px;letter-spacing:.1em}
+.brand .logout:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 
 .mode-banner{background:rgba(240,176,40,.14);border-bottom:1px solid var(--amber-deep);
   color:var(--amber);font-size:11px;letter-spacing:.08em;padding:6px 16px;
@@ -254,6 +257,7 @@ footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:v
   </nav>
   <div class="brand">
     <div class="name">SPECTER</div><div class="meta">RESUS · HUB-7F3A</div>
+    <form method="post" action="/logout"><button class="logout" type="submit">LOG OUT</button></form>
   </div>
 </header>
 

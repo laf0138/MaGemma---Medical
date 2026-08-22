@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║              SHTF SPECTER — CLONE & DEPLOY KIT  v1.0.0                     ║
+║              SHTF SPECTER — CLONE & DEPLOY KIT  v1.2.0                     ║
 ║                          clone_deploy.py                                    ║
 ║                                                                              ║
 ║  Offline field cloning tool. No internet required.                           ║
@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION      = "1.0.0"
+VERSION      = "1.2.0"
 SCRIPT_DIR   = Path(__file__).parent
 PAYLOAD_DIR  = SCRIPT_DIR / "payloads"
 
@@ -64,6 +64,8 @@ PACKAGES = {
             "/etc/mosquitto/conf.d/specter.conf",
             "/etc/mosquitto/specter_passwd",
             "/etc/mosquitto/specter_acl",
+            "/etc/nginx/sites-available/specter-dashboard",
+            "/etc/nginx/sites-enabled/specter-dashboard",
             "/etc/udev/rules.d/99-specter-sdr.rules",
             "/etc/modprobe.d/specter-rtlsdr.conf",
             "/etc/cron.d/specter",
@@ -76,15 +78,19 @@ PACKAGES = {
             "portaudio19-dev", "alsa-utils",
             "gpsd", "gpsd-clients", "chrony",
             "git", "curl", "wget", "usbutils", "i2c-tools",
-            "nginx",
+            "nginx", "openssl",
         ],
         "pip_packages": [
-            "numpy", "soundfile", "pyaudio", "paho-mqtt",
-            "flask", "flask-socketio", "eventlet", "requests",
+            "numpy==2.4.6", "scipy==1.17.1", "soundfile", "pyaudio",
+            "paho-mqtt==2.1.0", "flask==3.1.3", "flask-socketio==5.6.1",
+            "requests==2.33.1", "matplotlib==3.11.1",
+            "meshtastic==2.7.11",
         ],
         "services": [
             "specter-mqtt.service",
             "specter-dashboard.service",
+            "specter-ward.service",
+            "specter-mesh.service",
             "specter-rx-buffer.service",
             "specter-mqtt-coordinator.service",
             "specter-sdr-control.service",
@@ -117,7 +123,7 @@ PACKAGES = {
             "chromium-browser",
         ],
         "pip_packages": [
-            "flask", "flask-socketio", "eventlet", "paho-mqtt",
+            "flask", "flask-socketio", "paho-mqtt",
             "requests", "numpy", "chromadb",
             "sentence-transformers", "langchain",
             "langchain-community", "pypdf2", "pdfplumber",
@@ -689,7 +695,7 @@ def write_report(report: CloneReport, hw: dict) -> None:
     ]
     if "sdr" in report.target_packages:
         lines += [
-            "  SDR Dashboard:   http://192.168.1.1:5000",
+            "  SDR Dashboard:   https://192.168.1.1",
             "  Health check:    bash /opt/specter/scripts/health_check.sh",
             "  Logs:            journalctl -u specter-* -f",
         ]

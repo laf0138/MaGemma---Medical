@@ -28,9 +28,8 @@ VERSION = "1.2.0"
 # least-privilege ACL account per service. This is the "coordinator"
 # account: broad READ across shtf/# (its job is mesh-wide monitoring) but
 # WRITE limited to alarm/state/heartbeat, so it can't forge a trauma or
-# medical command. Fallback values below are used only when specter.json
-# has no mqtt.services.coordinator entry (e.g. running outside a real
-# install).
+# medical command. Runtime connections require the dedicated credential and
+# reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "coordinator"
 MQTT_DEFAULT_USERNAME = "specter-coordinator"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
@@ -55,36 +54,30 @@ def load_config() -> dict:
         return {"mqtt": {"broker": "192.168.1.1", "port": 1883}}
 
 
+def _service_credentials(mqtt_cfg: dict) -> tuple[str, str]:
+    service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
+
+
+def _mqtt_client(mqtt_module, client_id: str):
+    try:
+        return mqtt_module.Client(
+            mqtt_module.CallbackAPIVersion.VERSION2, client_id=client_id
+        )
+    except (AttributeError, TypeError):
+        return mqtt_module.Client(client_id=client_id)
+
+
 class MQTTCoordinator:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
         self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
         self.port     = mqtt_cfg.get("port", 1883)
-        if service_cfg:
-            self.username = service_cfg.get("username", MQTT_DEFAULT_USERNAME)
-            self.password = service_cfg.get("password", MQTT_DEFAULT_PASSWORD)
-        else:
-            # No dedicated services.<key> entry - do NOT fall back to the
-            # broad "operator" credential (mqtt.username/password). The
-            # coordinator's own ACL is already broad-READ by design, but
-            # "operator" is readWRITE on shtf/# - falling back to it would
-            # still hand this service write access its own ACL never
-            # grants. Fall to this service's own documented default
-            # instead - on a real broker its password won't match the
-            # real (derived) one for this account, so the connection is
-            # rejected rather than silently succeeding with elevated
-            # access.
-            log.error(
-                "specter.json has no mqtt.services.%s entry - using this "
-                "service's own default credential (which will fail to "
-                "authenticate against a real broker) instead of the broad "
-                "operator account. Re-run deploy/install_specter.py.",
-                MQTT_SERVICE_KEY,
-            )
-            self.username = MQTT_DEFAULT_USERNAME
-            self.password = MQTT_DEFAULT_PASSWORD
+        self.username, self.password = _service_credentials(mqtt_cfg)
 
         self.state: dict = {
             "pis": {},
@@ -100,13 +93,13 @@ class MQTTCoordinator:
         self._client     = None
         self._lock       = threading.Lock()
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             log.info("Connected to MQTT broker %s:%d", self.broker, self.port)
             client.subscribe(TOPIC_WILDCARD)
             log.info("Subscribed to %s", TOPIC_WILDCARD)
         else:
-            log.error("MQTT connect failed rc=%d", rc)
+            log.error("MQTT connect failed: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         topic   = msg.topic
@@ -189,7 +182,7 @@ class MQTTCoordinator:
     def run(self):
         import paho.mqtt.client as mqtt
 
-        client = mqtt.Client(client_id="specter_coordinator")
+        client = _mqtt_client(mqtt, "specter_coordinator")
         client.username_pw_set(self.username, self.password)
         client.on_connect = self._on_connect
         client.on_message = self._on_message

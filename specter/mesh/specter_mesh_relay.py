@@ -55,7 +55,7 @@ confirmation was received.
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.0.0
+Version: 1.2.0
 """
 
 import json
@@ -74,7 +74,7 @@ import paho.mqtt.client as mqtt
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -88,41 +88,26 @@ def _mqtt_client(client_id: str = ""):
 # can only read the alert/command topics and write its own status/sent/
 # inbound topics, so a leaked credential from any other service can't
 # forge mesh traffic, and a leaked mesh credential can't touch trauma/ward
-# state. Fallback values below are used only when specter.json has no
-# mqtt.services.mesh entry (e.g. running outside a real install).
+# state. Runtime connections require the dedicated credential and reject
+# the installer's placeholder password.
 MQTT_SERVICE_KEY      = "mesh"
 MQTT_DEFAULT_USERNAME = "specter-mesh"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
-def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+def _mqtt_credentials() -> tuple[str, str]:
+    """Return only this service's dedicated credential, or fail closed."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY)
-        if service_cfg:
-            return (
-                service_cfg.get("username", MQTT_DEFAULT_USERNAME),
-                service_cfg.get("password", MQTT_DEFAULT_PASSWORD),
-            )
-        # No dedicated services.<key> entry - do NOT fall back to the
-        # broad "operator" credential (mqtt.username/password): see
-        # trauma/ward's identical comment for why. Fall to this service's
-        # own documented default instead, which will fail to authenticate
-        # against a real broker rather than silently getting more access.
-        logger.error(
-            "specter.json has no mqtt.services.%s entry - using this "
-            "service's own default credential (which will fail to "
-            "authenticate against a real broker) instead of the broad "
-            "operator account. Re-run deploy/install_specter.py.",
-            MQTT_SERVICE_KEY,
-        )
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    if not isinstance(cfg, dict):
+        raise RuntimeError("MQTT configuration must be a JSON object")
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(
@@ -279,15 +264,15 @@ class MeshRelayService:
 
     # -- MQTT lifecycle ------------------------------------------------
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             client.subscribe(self.TOPIC_TRAUMA_ALERT, qos=1)
             client.subscribe(self.TOPIC_WARD_ALERT, qos=1)
             client.subscribe(self.TOPIC_SYSTEM_ALARM, qos=1)
             client.subscribe(self.TOPIC_COMMAND, qos=1)
             logger.info("MQTT connected")
         else:
-            logger.error("MQTT connect failed rc=%s", rc)
+            logger.error("MQTT connect failed: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         try:

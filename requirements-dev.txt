@@ -1,26 +1,68 @@
-# Pinned to the versions this codebase is actually tested against - an
-# unpinned install months from now (e.g. rebuilding a field kit) can pull
-# a materially different, untested version. Bump deliberately and re-run
-# the full test suite, don't let these drift silently.
+# Fully resolved development/test lock for Python 3.11+.
 #
-# These pins cover DIRECT dependencies only - transitive dependencies
-# (Flask's, Socket.IO's, neurokit2's own dependency trees) are still free
-# to resolve to a different version on a future install unless you use
-# requirements-dev.lock.txt instead, which pins and hashes every package
-# in the full resolved tree (regenerate after changing this file:
-# `pip install pip-tools && pip-compile --generate-hashes
-# --output-file=requirements-dev.lock.txt requirements-dev.txt`, then
-# commit the result - `pip install -r requirements-dev.lock.txt` for a
-# fully reproducible install).
-paho-mqtt==2.1.0
+# Direct requirements live in requirements-dev.in. All runtime transitive
+# dependencies are pinned here so a CI or field-test rebuild cannot silently
+# select a different dependency graph. Linux is the deployment/CI target;
+# Darwin markers retain developer support for Bleak on macOS.
+bidict==0.23.1
 bleak==3.0.2
 bleakheart==0.2.0
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.4.2
+contourpy==1.3.3
+coverage==7.15.4
+cycler==0.12.1
+dbus-fast==5.0.22 ; sys_platform == "linux"
+Flask==3.1.3
+Flask-SocketIO==5.6.1
+fonttools==4.63.0
+h11==0.16.0
+idna==3.19
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+joblib==1.5.3
+kiwisolver==1.5.0
+MarkupSafe==3.0.3
+matplotlib==3.11.1
+meshtastic==2.7.11
+narwhals==2.25.0
 neurokit2==0.2.13
 numpy==2.4.6
-requests==2.33.1
-flask==3.1.3
-flask-socketio==5.6.1
-eventlet==0.41.2
-meshtastic==2.7.11
+packaging==26.3
+paho-mqtt==2.1.0
+pandas==2.3.3
+pillow==12.3.0
+pluggy==1.6.0
+Pygments==2.21.0
+pyobjc-core==12.2.2 ; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.2 ; sys_platform == "darwin"
+pyobjc-framework-CoreBluetooth==12.2.2 ; sys_platform == "darwin"
+pyobjc-framework-libdispatch==12.2.2 ; sys_platform == "darwin"
+pyparsing==3.3.2
+protobuf==7.36.0
+pypubsub==4.0.7
+pyserial==3.5
 pytest==9.1.1
 pytest-cov==7.1.0
+python-dateutil==2.9.0.post0
+python-engineio==4.13.5
+python-socketio==5.16.4
+pytz==2026.3.post1
+PyWavelets==1.9.0
+PyYAML==6.0.3
+requests==2.33.1
+scikit-learn==1.9.0
+scipy==1.17.1
+setuptools==81.0.0
+simple-websocket==1.1.0
+six==1.17.0
+tabulate==0.9.0
+threadpoolctl==3.6.0
+typing-extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+Werkzeug==3.1.8
+wsproto==1.3.2
