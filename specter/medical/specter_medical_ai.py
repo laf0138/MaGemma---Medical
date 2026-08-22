@@ -264,18 +264,21 @@ class VitalsCache:
         "glucose_mg_dl": "Blood glucose",
         "ecg_rhythm": "ECG rhythm",
         "respiratory_rate": "Respiratory rate",
-        "ecg_qrs_duration_ms": "ECG QRS duration",
-        "ecg_r_wave_amplitude_uv": "ECG R-wave amplitude",
-        "ecg_t_wave_amplitude_uv": "ECG T-wave amplitude",
-        "ecg_t_r_ratio": "ECG T/R amplitude ratio",
-        "ecg_advisory_flags": "ECG advisory flags",
+        "ecg_q_s_peak_interval_ms": "ECG Q-to-S peak interval (experimental; not QRS duration)",
+        "ecg_r_wave_abs_amplitude_uv": "ECG absolute R-wave amplitude (experimental)",
+        "ecg_t_wave_abs_amplitude_uv": "ECG absolute T-wave amplitude (experimental)",
+        "ecg_t_r_abs_ratio": "ECG absolute T/R amplitude ratio (experimental)",
+        "ecg_morphology_beats_analyzed": "ECG valid Q-R-S beats analyzed",
+        "ecg_amplitude_beats_analyzed": "ECG valid R-T beats analyzed",
+        "ecg_analysis_status": "ECG analysis validation status",
+        "ecg_analysis_warnings": "ECG analysis warnings",
     }
 
     # Raw sample arrays (a full ECG waveform, a list of RR intervals) are
     # not useful dumped into a text prompt - hundreds/thousands of bare
     # numbers waste context and tell MedGemma nothing a text model can act
-    # on. See medical/ecg_analysis.py: the derived scalars (QRS duration,
-    # wave amplitudes, advisory flags) are what belong in the prompt: the
+    # on. See medical/ecg_analysis.py: the explicitly experimental derived
+    # scalars and completeness metadata are what belong in the prompt: the
     # raw waveform is future multimodal-input material, not implemented
     # here (see docs/MANUAL.md Part 7.4).
     RAW_ARRAY_READING_TYPES = {"ecg_waveform_uv", "rr_intervals_ms"}
@@ -492,7 +495,7 @@ class VitalsCache:
             stale_any = stale_any or stale
             stale_txt = "  [STALE - may not reflect current state]" if stale else ""
 
-            if reading_type == "ecg_advisory_flags" and isinstance(reading.value, list):
+            if reading_type == "ecg_analysis_warnings" and isinstance(reading.value, list):
                 if not reading.value:
                     continue
                 lines.append(f"  - {label} ({age_txt}){stale_txt}:")

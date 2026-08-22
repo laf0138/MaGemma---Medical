@@ -264,40 +264,40 @@ class TestVitalsCacheEcgFields:
         assert "rr_intervals_ms" not in block
         assert "810" not in block
 
-    def test_derived_qrs_duration_appears_with_label_and_unit(self):
+    def test_experimental_q_s_peak_interval_is_precisely_labelled(self):
         cache = VitalsCache()
-        cache.update("p1", "ecg_qrs_duration_ms", VitalReading(
+        cache.update("p1", "ecg_q_s_peak_interval_ms", VitalReading(
             value=84.6, unit="ms", timestamp_utc=iso()))
         block = cache.to_prompt_block("p1")
-        assert "ECG QRS duration: 84.6 ms" in block
+        assert "ECG Q-to-S peak interval (experimental; not QRS duration): 84.6 ms" in block
 
-    def test_derived_t_r_ratio_appears(self):
+    def test_experimental_absolute_t_r_ratio_appears(self):
         cache = VitalsCache()
-        cache.update("p1", "ecg_t_r_ratio", VitalReading(
+        cache.update("p1", "ecg_t_r_abs_ratio", VitalReading(
             value=0.33, unit="ratio", timestamp_utc=iso()))
         block = cache.to_prompt_block("p1")
-        assert "ECG T/R amplitude ratio: 0.33 ratio" in block
+        assert "ECG absolute T/R amplitude ratio (experimental): 0.33 ratio" in block
 
-    def test_advisory_flags_render_as_individual_lines(self):
+    def test_analysis_warnings_render_as_individual_lines(self):
         cache = VitalsCache()
-        cache.update("p1", "ecg_advisory_flags", VitalReading(
+        cache.update("p1", "ecg_analysis_warnings", VitalReading(
             value=[
-                "QRS duration 145ms is above the 120ms widened-QRS threshold - non-specific.",
-                "T-wave amplitude is 0.80x the R-wave amplitude, above the 0.75x advisory threshold.",
+                "Q-to-S peak interval withheld: fewer than 3 valid Q-R-S beat tuples",
+                "Wave amplitudes withheld: fewer than 3 valid R-T beat pairs",
             ],
             unit="text", timestamp_utc=iso(),
         ))
         block = cache.to_prompt_block("p1")
-        assert "ECG advisory flags" in block
-        assert "QRS duration 145ms is above the 120ms widened-QRS threshold" in block
-        assert "T-wave amplitude is 0.80x the R-wave amplitude" in block
+        assert "ECG analysis warnings" in block
+        assert "Q-to-S peak interval withheld" in block
+        assert "Wave amplitudes withheld" in block
 
-    def test_empty_advisory_flags_list_produces_no_output(self):
+    def test_empty_analysis_warnings_list_produces_no_output(self):
         cache = VitalsCache()
-        cache.update("p1", "ecg_advisory_flags", VitalReading(
+        cache.update("p1", "ecg_analysis_warnings", VitalReading(
             value=[], unit="text", timestamp_utc=iso()))
         block = cache.to_prompt_block("p1")
-        assert "ECG advisory flags" not in block
+        assert "ECG analysis warnings" not in block
 
 
 # ---------------------------------------------------------------------------

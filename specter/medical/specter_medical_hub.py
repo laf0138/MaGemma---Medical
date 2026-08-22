@@ -714,19 +714,25 @@ class MedicalHubBleCollector:
             if 'error' in analysis:
                 logger.info(f"Polar H10 ECG analysis skipped for {device_info['name']}: {analysis['error']}")
             else:
-                if 'qrs_duration_ms' in analysis:
-                    result['ecg_qrs_duration_ms'] = analysis['qrs_duration_ms']
-                if 'r_wave_amplitude_uv' in analysis:
-                    result['ecg_r_wave_amplitude_uv'] = analysis['r_wave_amplitude_uv']
-                if 't_wave_amplitude_uv' in analysis:
-                    result['ecg_t_wave_amplitude_uv'] = analysis['t_wave_amplitude_uv']
-                if 't_r_ratio' in analysis:
-                    result['ecg_t_r_ratio'] = analysis['t_r_ratio']
-                if analysis.get('flags'):
-                    result['ecg_advisory_flags'] = analysis['flags']
-                    logger.warning(
-                        f"Polar H10 ECG advisory flag(s) for {device_info['name']}: {analysis['flags']}"
-                    )
+                # These names are intentionally precise.  NeuroKit2 gives us
+                # Q/S peak locations, not a validated clinical QRS onset-to-
+                # offset duration.  Publishing that proxy as "QRS duration"
+                # made it too easy for a UI or model to apply an inapplicable
+                # diagnostic threshold.
+                analysis_fields = {
+                    'q_s_peak_interval_ms': 'ecg_q_s_peak_interval_ms',
+                    'r_wave_abs_amplitude_uv': 'ecg_r_wave_abs_amplitude_uv',
+                    't_wave_abs_amplitude_uv': 'ecg_t_wave_abs_amplitude_uv',
+                    't_r_abs_ratio': 'ecg_t_r_abs_ratio',
+                    'morphology_beats_analyzed': 'ecg_morphology_beats_analyzed',
+                    'amplitude_beats_analyzed': 'ecg_amplitude_beats_analyzed',
+                    'analysis_status': 'ecg_analysis_status',
+                }
+                for analysis_key, reading_key in analysis_fields.items():
+                    if analysis_key in analysis:
+                        result[reading_key] = analysis[analysis_key]
+                if analysis.get('warnings'):
+                    result['ecg_analysis_warnings'] = analysis['warnings']
 
         if latest_hr is not None:
             result['pulse'] = latest_hr
@@ -757,11 +763,14 @@ class MedicalHubBleCollector:
                         'ecg_rhythm': 'classification',
                         'ecg_waveform_uv': 'uV',
                         'rr_intervals_ms': 'ms',
-                        'ecg_qrs_duration_ms': 'ms',
-                        'ecg_r_wave_amplitude_uv': 'uV',
-                        'ecg_t_wave_amplitude_uv': 'uV',
-                        'ecg_t_r_ratio': 'ratio',
-                        'ecg_advisory_flags': 'text',
+                        'ecg_q_s_peak_interval_ms': 'ms',
+                        'ecg_r_wave_abs_amplitude_uv': 'uV',
+                        'ecg_t_wave_abs_amplitude_uv': 'uV',
+                        'ecg_t_r_abs_ratio': 'ratio',
+                        'ecg_morphology_beats_analyzed': 'beats',
+                        'ecg_amplitude_beats_analyzed': 'beats',
+                        'ecg_analysis_status': 'status',
+                        'ecg_analysis_warnings': 'text',
                     }
                     unit = unit_map.get(reading_type, 'unknown')
                     

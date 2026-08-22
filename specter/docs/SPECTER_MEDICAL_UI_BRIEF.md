@@ -26,11 +26,13 @@ Everything the medical displays can draw on. Nothing here is aspirational; each 
 | `glucose_mg_dl` | mg/dL | Contour Next One | On measurement |
 | `ecg_waveform_uv` | µV, 130Hz samples | Polar H10 | Per collection cycle (`polar_stream_seconds`, default 10s) |
 | `rr_intervals_ms` | ms | Polar H10 | Per collection cycle |
-| `ecg_qrs_duration_ms` | ms | Polar H10 (derived, NeuroKit2) | Per collection cycle |
-| `ecg_r_wave_amplitude_uv` | µV | Polar H10 (derived, NeuroKit2) | Per collection cycle |
-| `ecg_t_wave_amplitude_uv` | µV | Polar H10 (derived, NeuroKit2) | Per collection cycle |
-| `ecg_t_r_ratio` | ratio | Polar H10 (derived, NeuroKit2) | Per collection cycle |
-| `ecg_advisory_flags` | text, hedged | Polar H10 (derived, NeuroKit2) | Per collection cycle, only when present |
+| `ecg_q_s_peak_interval_ms` | ms; experimental, **not clinical QRS duration** | Polar H10 (derived, NeuroKit2) | Per collection cycle when ≥3 valid Q-R-S tuples |
+| `ecg_r_wave_abs_amplitude_uv` | µV; experimental | Polar H10 (derived, NeuroKit2) | Per collection cycle when ≥3 valid R-T pairs |
+| `ecg_t_wave_abs_amplitude_uv` | µV; experimental | Polar H10 (derived, NeuroKit2) | Per collection cycle when ≥3 valid R-T pairs |
+| `ecg_t_r_abs_ratio` | ratio; experimental, no diagnostic threshold | Polar H10 (derived, NeuroKit2) | Per collection cycle when ≥3 valid R-T pairs |
+| `ecg_morphology_beats_analyzed` / `ecg_amplitude_beats_analyzed` | beats | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_analysis_status` | `experimental_not_clinically_validated` | Polar H10 (derived, NeuroKit2) | Per collection cycle |
+| `ecg_analysis_warnings` | text | Polar H10 (derived, NeuroKit2) | Per collection cycle, only when a measurement is withheld |
 | `ecg_rhythm` | normal / afib / inconclusive / unreadable | ~~AliveCor KardiaMobile 6L~~ REMOVED, see Part 7.4 | On measurement |
 
 Per-reading metadata, all displayable: `device_name`, `timestamp_utc`, `rssi` (dBm), `battery_pct` (BLE characteristic 0x2A19).

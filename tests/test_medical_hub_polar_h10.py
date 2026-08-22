@@ -199,8 +199,8 @@ class TestEcgAnalysisWiring:
 
         result = asyncio.run(run())
         assert result["ecg_waveform_uv"] == [1, 2, 3]
-        assert "ecg_qrs_duration_ms" not in result
-        assert "ecg_advisory_flags" not in result
+        assert "ecg_q_s_peak_interval_ms" not in result
+        assert "ecg_analysis_status" not in result
 
     def test_realistic_waveform_populates_analysis_fields(self, hub):
         sr = hub_mod.POLAR_H10_ECG_SAMPLE_RATE_HZ
@@ -218,11 +218,14 @@ class TestEcgAnalysisWiring:
 
         result = asyncio.run(run())
         assert result["ecg_waveform_uv"] == samples
-        assert "ecg_qrs_duration_ms" in result
-        assert "ecg_r_wave_amplitude_uv" in result
-        assert "ecg_t_wave_amplitude_uv" in result
-        assert "ecg_t_r_ratio" in result
-        # A normal synthetic beat should not raise an advisory flag.
+        assert "ecg_q_s_peak_interval_ms" in result
+        assert "ecg_qrs_duration_ms" not in result
+        assert "ecg_r_wave_abs_amplitude_uv" in result
+        assert "ecg_t_wave_abs_amplitude_uv" in result
+        assert "ecg_t_r_abs_ratio" in result
+        assert result["ecg_morphology_beats_analyzed"] >= 3
+        assert result["ecg_analysis_status"] == "experimental_not_clinically_validated"
+        # Unvalidated morphology must not become a diagnostic-style alert.
         assert "ecg_advisory_flags" not in result
 
 
