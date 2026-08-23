@@ -12,6 +12,7 @@
       "ward":        {"username": "specter-ward",        "password": "specter-change-me"},
       "medical_ai":  {"username": "specter-medical-ai",  "password": "specter-change-me"},
       "medical_hub": {"username": "specter-medical-hub", "password": "specter-change-me"},
+      "ecg_ai":      {"username": "specter-ecg-ai",      "password": "specter-change-me"},
       "coordinator": {"username": "specter-coordinator", "password": "specter-change-me"},
       "sdr_control": {"username": "specter-sdr-control", "password": "specter-change-me"},
       "thermal":     {"username": "specter-thermal",     "password": "specter-change-me"},
@@ -42,6 +43,17 @@
     "max_record_seconds": 300,
     "sample_rate": 48000,
     "channels": 1
+  },
+  "ecg_ai": {
+    "service_enabled": false,
+    "inbox_dir": "/mnt/specter/live/ecg/inbox",
+    "archive_dir": "/mnt/specter/archive/ecg",
+    "rejected_dir": "/mnt/specter/archive/ecg-rejected",
+    "model_registry": "/etc/specter/ecg-models.json",
+    "poll_seconds": 5,
+    "model_timeout_seconds": 120,
+    "max_file_age_seconds": 86400,
+    "hardware_validation_status": "pending_real_biocare_ie300_xml_sample"
   },
   "gps": {
     "device": "/dev/ttyACM0",

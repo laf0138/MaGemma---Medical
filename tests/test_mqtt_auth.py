@@ -31,6 +31,7 @@ import core.thermal_monitor as thermal_mod
 import dashboard.dashboard_server as dashboard_mod
 import medical.specter_medical_ai as medical_ai_mod
 import medical.specter_medical_hub as medical_hub_mod
+import medical.specter_ecg_ai as ecg_ai_mod
 import mesh.specter_mesh_relay as mesh_mod
 import services.library_api as library_mod
 import services.specter_rx_ring_buffer as rx_mod
@@ -52,6 +53,7 @@ class TestPerServiceDefaultUsernamesAreDistinct:
             "mesh": mesh_mod.MQTT_DEFAULT_USERNAME,
             "medical_ai": medical_ai_mod.MQTT_DEFAULT_USERNAME,
             "medical_hub": medical_hub_mod.MQTT_DEFAULT_USERNAME,
+            "ecg_ai": ecg_ai_mod.MQTT_DEFAULT_USERNAME,
             "coordinator": coordinator_mod.MQTT_DEFAULT_USERNAME,
             "sdr_control": sdr_mod.MQTT_DEFAULT_USERNAME,
             "thermal": thermal_mod.MQTT_DEFAULT_USERNAME,
@@ -115,6 +117,19 @@ class TestMedicalAICredentialsResolution:
                              lambda self: (_ for _ in ()).throw(FileNotFoundError()))
         with pytest.raises(RuntimeError, match="MQTT configuration is unreadable"):
             medical_ai_mod._mqtt_credentials()
+
+
+class TestECGAICredentialsResolution:
+    def test_service_entry_wins(self):
+        config = {"mqtt": {"services": {"ecg_ai": {
+            "username": "specter-ecg-ai", "password": "svc-pass"
+        }}}}
+        assert ecg_ai_mod._mqtt_credentials(config) == ("specter-ecg-ai", "svc-pass")
+
+    @pytest.mark.parametrize("service", [{}, {"username": "specter-ecg-ai", "password": "specter-change-me"}])
+    def test_missing_or_placeholder_fails_closed(self, service):
+        with pytest.raises(RuntimeError, match="dedicated MQTT credentials missing"):
+            ecg_ai_mod._mqtt_credentials({"mqtt": {"services": {"ecg_ai": service}}})
 
 
 class TestWardCredentialsResolution:

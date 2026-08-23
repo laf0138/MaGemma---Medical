@@ -27,3 +27,16 @@ python specter/medical/polar_h10_validation.py --self-test --output polar-h10-se
 See [the validation procedure](specter/docs/POLAR_H10_VALIDATION.md). A passing
 self-test is deliberately labelled as offline-only; it does not mark the H10
 hardware or the experimental ECG measurements clinically validated.
+
+## Twelve-lead ECG research pipeline
+
+The Biocare/DeepECG-SL/AntonioR92/ECG-XPLAIM/PTB-XL/MedGemma/ONNX path is
+integrated but ships safely disabled until exact hardware exports, model files,
+hashes, task labels and datasets are provisioned:
+
+```bash
+python specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json status
+```
+
+See [the implementation and commissioning status](specter/docs/ECG_AI_IMPLEMENTATION_STATUS.md).
+Passing software tests is not hardware or clinical validation.

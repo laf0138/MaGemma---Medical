@@ -230,6 +230,7 @@ class TestMqttAndEngineLifecycle:
             engine.TOPIC_VITALS,
             engine.TOPIC_QUERY,
             engine.TOPIC_PROFILE,
+            engine.TOPIC_ECG_ANALYSIS,
         ]
         status = json.loads(engine.mqtt.published[-1][1])
         assert status["state"] == "online"

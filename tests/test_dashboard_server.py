@@ -342,6 +342,19 @@ class TestOnMessageDispatch:
         mqtt._on_message(None, None, msg("shtf/system/thermal", {"cpu_temp_c": 55}))
         assert ds.STATE["thermal"]["cpu_temp_c"] == 55
 
+    def test_ecg_analysis_routes_only_when_patient_matches(self, mqtt):
+        payload = {
+            "schema_version": 1,
+            "status": "complete",
+            "patient_id": "p1",
+            "record_id": "r1",
+            "models": [],
+        }
+        mqtt._on_message(None, None, msg("shtf/medical/ecg_analysis/p1", payload))
+        assert ds.STATE["medical"]["ecg_analysis"]["p1"] == payload
+        mqtt._on_message(None, None, msg("shtf/medical/ecg_analysis/p2", payload))
+        assert "p2" not in ds.STATE["medical"]["ecg_analysis"]
+
     def test_unmatched_topic_is_silently_ignored(self, mqtt):
         mqtt._on_message(None, None, msg("shtf/nonexistent/topic", {"x": 1}))
         assert mqtt.pushed == []

@@ -108,6 +108,7 @@ STATE: dict = {
     "thermal": {"cpu_temp_c": 0, "throttle": {}},
     "ward": {"episodes": [], "updated": 0},
     "mesh": {"status": "unknown", "updated": 0, "messages": []},
+    "medical": {"ecg_analysis": {}, "ecg_status": {}, "updated": 0},
     "alarms": [],
     "system": {"uptime": 0, "version": VERSION},
     "mqtt_connected": False,
@@ -364,6 +365,8 @@ class DashboardMQTT:
         "shtf/ward/alert":      "_on_ward_alert",
         "shtf/mesh/status":     "_on_mesh_status",
         "shtf/mesh/inbound":    "_on_mesh_inbound",
+        "shtf/medical/ecg/status": "_on_ecg_status",
+        "shtf/medical/ecg_analysis/+": "_on_ecg_analysis",
     }
 
     def __init__(self, broker: str, port: int, username: str, password: str):
@@ -495,6 +498,32 @@ class DashboardMQTT:
             STATE["mesh"]["messages"].append(data)
             STATE["mesh"]["messages"] = STATE["mesh"]["messages"][-50:]
         self._push("mesh_message", data)
+
+    def _on_ecg_status(self, topic: str, data):
+        if not isinstance(data, dict):
+            return
+        with STATE_LOCK:
+            STATE["medical"]["ecg_status"] = data
+            STATE["medical"]["updated"] = time.time()
+        self._push("ecg_status", data)
+
+    def _on_ecg_analysis(self, topic: str, data):
+        if (
+            not isinstance(data, dict)
+            or data.get("schema_version") != 1
+            or data.get("status") not in {"complete", "models_unavailable"}
+        ):
+            return
+        patient_id = topic.split("/")[-1]
+        if data.get("patient_id") != patient_id:
+            log.warning("Rejected mismatched ECG analysis topic/payload patient")
+            return
+        # Retain the complete structured result for the authenticated UI;
+        # original waveform arrays remain in the ECG archive, not browser RAM.
+        with STATE_LOCK:
+            STATE["medical"]["ecg_analysis"][patient_id] = data
+            STATE["medical"]["updated"] = time.time()
+        self._push("ecg_analysis", {"patient_id": patient_id, "analysis": data})
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic

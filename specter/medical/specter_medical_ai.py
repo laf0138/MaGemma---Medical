@@ -552,6 +552,158 @@ class VitalsCache:
         return "\n".join(lines)
 
 
+class ECGAnalysisCache:
+    """Latest structured 12-lead result per patient.
+
+    The original waveform is consumed by the ECG models and retained in the
+    ECG archive.  It is not converted to thousands of text tokens for
+    MedGemma; complete model probabilities, device measurements, quality,
+    provenance, and disagreements are supplied instead.
+    """
+
+    MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, stale_seconds: int = 86400):
+        self._lock = threading.Lock()
+        self._latest: Dict[str, Dict[str, Any]] = {}
+        self.stale_seconds = stale_seconds
+
+    def update(self, patient_id: str, payload: Dict[str, Any]) -> bool:
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return False
+        if payload.get("patient_id") != patient_id:
+            return False
+        if payload.get("status") not in {"complete", "models_unavailable"}:
+            return False
+        if not payload.get("record_id") or not isinstance(payload.get("models"), list):
+            return False
+        try:
+            encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
+            timestamp = datetime.fromisoformat(str(payload["acquired_at_utc"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if len(encoded) > self.MAX_PAYLOAD_BYTES or timestamp.tzinfo is None:
+            return False
+        if len(payload["models"]) > 20:
+            return False
+        for model in payload["models"]:
+            if not isinstance(model, dict) or model.get("status") not in {"complete", "unavailable"}:
+                return False
+            probabilities = model.get("probabilities", {})
+            if not isinstance(probabilities, dict) or len(probabilities) > 500:
+                return False
+            findings = model.get("findings", [])
+            if not isinstance(findings, list) or any(not isinstance(item, str) for item in findings):
+                return False
+            try:
+                if any(not 0 <= float(value) <= 1 for value in probabilities.values()):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        with self._lock:
+            self._latest[patient_id] = json.loads(json.dumps(payload))
+        return True
+
+    def latest(self, patient_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            payload = self._latest.get(patient_id)
+            return json.loads(json.dumps(payload)) if payload is not None else None
+
+    @staticmethod
+    def _age_seconds(payload: Dict[str, Any]) -> float:
+        try:
+            timestamp = datetime.fromisoformat(str(payload["acquired_at_utc"]).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                return float("inf")
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+            return age if age >= 0 else float("inf")
+        except (KeyError, TypeError, ValueError):
+            return float("inf")
+
+    def to_prompt_block(self, patient_id: str) -> str:
+        payload = self.latest(patient_id)
+        if payload is None:
+            return (
+                "12-LEAD ECG RESEARCH ANALYSIS: none received. Do not infer a "
+                "12-lead result from the single-lead Polar H10 waveform."
+            )
+        age = self._age_seconds(payload)
+        age_text = f"{age / 3600:.1f}h ago" if age != float("inf") else "invalid/future timestamp"
+        lines = [
+            "12-LEAD ECG RESEARCH ANALYSIS (not a diagnosis):",
+            f"  Record: {payload.get('record_id')} acquired {payload.get('acquired_at_utc')} "
+            f"({age_text})",
+            f"  Freshness: {'STALE - do not treat as current' if age > self.stale_seconds else 'within configured window'}",
+        ]
+        quality = payload.get("quality", {})
+        lines.append(f"  Signal quality gate: {quality.get('status', 'unknown')}")
+        for issue in quality.get("issues", []):
+            lines.append(f"    - {issue}")
+        acquisition = payload.get("acquisition_metadata", {})
+        relevant_metadata = {
+            key: value for key, value in acquisition.items()
+            if any(token in key.lower() for token in (
+                "filter", "calibr", "sensitivity", "samplerate", "samplingrate",
+                "device", "model", "firmware", "leadmode", "paperspeed",
+            ))
+        }
+        if relevant_metadata:
+            lines.append("  Acquisition settings/provenance:")
+            for key, value in sorted(relevant_metadata.items()):
+                lines.append(f"    - {key}: {value}")
+        machine = payload.get("machine_output", {})
+        measurements = machine.get("measurements", {})
+        if measurements:
+            lines.append("  Biocare machine measurements (unverified device output):")
+            for key, value in sorted(measurements.items()):
+                lines.append(f"    - {key}: {value}")
+        interpretations = machine.get("interpretation", [])
+        if interpretations:
+            lines.append("  Biocare machine interpretation (unverified; must review tracing):")
+            lines.extend(f"    - {item}" for item in interpretations)
+        deterministic = payload.get("deterministic_measurements", {})
+        if deterministic:
+            lines.append(
+                "  Deterministic lead-II measurements "
+                f"({deterministic.get('analysis_status', 'status unknown')}):"
+            )
+            excluded = {"disclaimer", "warnings", "analysis_status", "method", "source_lead", "source_unit"}
+            for key, value in sorted(deterministic.items()):
+                if key not in excluded:
+                    lines.append(f"    - {key}: {value}")
+            for warning in deterministic.get("warnings", []):
+                lines.append(f"    - WITHHELD/WARNING: {warning}")
+            if deterministic.get("disclaimer"):
+                lines.append("    " + str(deterministic["disclaimer"]))
+        for model in payload.get("models", []):
+            name = model.get("display_name") or model.get("model_id", "unknown model")
+            lines.append(
+                f"  {name} {model.get('version', '')}: {model.get('status', 'unknown')} "
+                f"[artifact {str(model.get('artifact_sha256', ''))[:12]}]"
+            )
+            if model.get("status") != "complete":
+                lines.append(f"    unavailable reason: {model.get('error', 'not reported')}")
+                continue
+            probabilities = model.get("probabilities", {})
+            for label, probability in sorted(probabilities.items(), key=lambda pair: (-float(pair[1]), pair[0])):
+                lines.append(f"    - {label}: probability {float(probability):.4f}")
+            findings = model.get("findings", [])
+            if model.get("thresholds_applied"):
+                lines.append("    thresholded research flags: " + (", ".join(findings) if findings else "none"))
+            else:
+                lines.append("    thresholded research flags: WITHHELD - no registered thresholds")
+            explanation = model.get("explanation")
+            if explanation:
+                lines.append("    explainability output: " + json.dumps(explanation, sort_keys=True)[:4000])
+        disagreement = payload.get("agreement", {}).get("disagreements", [])
+        lines.append("  Cross-model disagreements: " + (", ".join(disagreement) if disagreement else "none reported"))
+        lines.append(
+            "  Use these outputs only to suggest questions and priorities. Never convert a "
+            "model probability into a diagnosis, and never treat an unavailable model as negative."
+        )
+        return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Retrieval (ChromaDB + Kiwix)
 # ---------------------------------------------------------------------------
@@ -677,9 +829,15 @@ question actually asked."""
 
 
 class PromptBuilder:
-    def __init__(self, vitals: VitalsCache, profiles: Dict[str, PatientProfile]):
+    def __init__(
+        self,
+        vitals: VitalsCache,
+        profiles: Dict[str, PatientProfile],
+        ecg_analyses: Optional[ECGAnalysisCache] = None,
+    ):
         self.vitals = vitals
         self.profiles = profiles
+        self.ecg_analyses = ecg_analyses or ECGAnalysisCache()
 
     def profile_for(self, patient_id: str) -> PatientProfile:
         return self.profiles.get(
@@ -700,6 +858,8 @@ class PromptBuilder:
             self.profile_for(patient_id).to_prompt_block(),
             "",
             self.vitals.to_prompt_block(patient_id),
+            "",
+            self.ecg_analyses.to_prompt_block(patient_id),
             "",
             retriever.to_prompt_block(passages),
         ]
@@ -788,13 +948,15 @@ class MedicalAIEngine:
     TOPIC_VITALS = "shtf/medical/vitals/#"
     TOPIC_QUERY = "shtf/medical/query/#"
     TOPIC_PROFILE = "shtf/medical/profile/#"
+    TOPIC_ECG_ANALYSIS = "shtf/medical/ecg_analysis/#"
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.vitals = VitalsCache(stale_seconds=cfg.vitals_stale_seconds)
+        self.ecg_analyses = ECGAnalysisCache()
         self.profiles = default_profiles()
         self.retriever = GuidelineRetriever(cfg)
-        self.prompts = PromptBuilder(self.vitals, self.profiles)
+        self.prompts = PromptBuilder(self.vitals, self.profiles, self.ecg_analyses)
         self.ollama = OllamaClient(cfg)
 
         self.mqtt = _mqtt_client("specter-medical-ai")
@@ -815,6 +977,7 @@ class MedicalAIEngine:
             client.subscribe(self.TOPIC_VITALS, qos=1)
             client.subscribe(self.TOPIC_QUERY, qos=1)
             client.subscribe(self.TOPIC_PROFILE, qos=1)
+            client.subscribe(self.TOPIC_ECG_ANALYSIS, qos=1)
             self._publish_status("online")
         else:
             self.connected = False
@@ -845,6 +1008,8 @@ class MedicalAIEngine:
             self._handle_query(topic, payload)
         elif topic.startswith("shtf/medical/profile/"):
             self._handle_profile(topic, payload)
+        elif topic.startswith("shtf/medical/ecg_analysis/"):
+            self._handle_ecg_analysis(topic, payload)
 
     # -- Handlers ----------------------------------------------------------
 
@@ -913,6 +1078,16 @@ class MedicalAIEngine:
         self.profiles[patient_id] = prof
         self.prompts.profiles = self.profiles
         logger.info("Updated profile for %s", patient_id)
+
+    def _handle_ecg_analysis(self, topic: str, payload: Dict[str, Any]) -> None:
+        parts = topic.split("/")
+        if len(parts) != 4:
+            return
+        patient_id = parts[3]
+        if not self.ecg_analyses.update(patient_id, payload):
+            logger.warning("Rejected malformed or mismatched ECG analysis for %s", patient_id)
+            return
+        logger.info("Cached 12-lead ECG analysis for %s", patient_id)
 
     def _handle_query(self, topic: str, payload: Dict[str, Any]) -> None:
         parts = topic.split("/")
@@ -1014,6 +1189,7 @@ class MedicalAIEngine:
             "error": error,
             "model": self.cfg.model,
             "vitals_used": vitals_snapshot,
+            "ecg_analysis_used": self.ecg_analyses.latest(patient_id),
             "sources": [
                 {"source": p["source"], "page": p.get("page")} for p in (passages or [])
             ],

@@ -62,6 +62,7 @@ MQTT_USERNAME = os.environ.get("SPECTER_MQTT_USER", MQTT_DEFAULT_USERNAME)
 MQTT_PASSWORD = os.environ.get("SPECTER_MQTT_PASSWORD", MQTT_DEFAULT_PASSWORD)
 DASHBOARD_USERNAME = os.environ.get("SPECTER_DASHBOARD_USER", "specter-admin")
 DASHBOARD_PASSWORD = os.environ.get("SPECTER_DASHBOARD_PASSWORD", "")
+ECG_AI_ENABLED = os.environ.get("SPECTER_ENABLE_ECG_AI", "").strip().lower() in {"1", "true", "yes"}
 
 # service key -> (mqtt username, ACL rules). Rules are (permission, topic)
 # pairs using standard MQTT ACL wildcards (+ single level, # multi-level).
@@ -108,6 +109,7 @@ MQTT_SERVICES: dict[str, dict] = {
             ("read", "shtf/medical/vitals/#"),
             ("read", "shtf/medical/query/#"),
             ("read", "shtf/medical/profile/#"),
+            ("read", "shtf/medical/ecg_analysis/#"),
             ("write", "shtf/medical/diagnosis/#"),
             ("write", "shtf/medical/ai/status"),
             # MAP/pulse pressure/shock index/NEWS2/qSOFA/fever burden/
@@ -122,6 +124,14 @@ MQTT_SERVICES: dict[str, dict] = {
         "acl": [
             ("read", "shtf/medical/hub/command/#"),
             ("write", "shtf/medical/vitals/#"),
+        ],
+    },
+    "ecg_ai": {
+        "username": "specter-ecg-ai",
+        "acl": [
+            ("read", "shtf/medical/ecg/command"),
+            ("write", "shtf/medical/ecg/status"),
+            ("write", "shtf/medical/ecg_analysis/#"),
         ],
     },
     "coordinator": {
@@ -209,6 +219,9 @@ LOG_DIR     = Path("/var/log/specter")
 RUN_DIR     = Path("/run/specter")
 RECORD_DIR  = Path("/mnt/specter/live/recordings")
 ARCHIVE_DIR = Path("/mnt/specter/archive")
+ECG_INBOX_DIR = Path("/mnt/specter/live/ecg/inbox")
+ECG_ARCHIVE_DIR = ARCHIVE_DIR / "ecg"
+ECG_REJECTED_DIR = ARCHIVE_DIR / "ecg-rejected"
 VENV_DIR    = BASE_DIR / "venv"
 SCRIPTS_DIR = BASE_DIR / "scripts"
 TLS_DIR     = CONFIG_DIR / "tls"
@@ -521,6 +534,7 @@ def create_user_and_dirs(report: InstallReport) -> None:
     dirs = [
         BASE_DIR, CONFIG_DIR, LOG_DIR, SCRIPTS_DIR,
         RECORD_DIR, ARCHIVE_DIR,
+        ECG_INBOX_DIR, ECG_ARCHIVE_DIR, ECG_REJECTED_DIR,
         Path("/mnt/specter/live"),
     ]
     for d in dirs:
@@ -529,7 +543,7 @@ def create_user_and_dirs(report: InstallReport) -> None:
         report.files_deployed.append(str(d))
 
     # Ownership
-    for d in [BASE_DIR, LOG_DIR, RECORD_DIR, ARCHIVE_DIR]:
+    for d in [BASE_DIR, LOG_DIR, RECORD_DIR, ARCHIVE_DIR, ECG_INBOX_DIR, ECG_ARCHIVE_DIR, ECG_REJECTED_DIR]:
         run(["chown", "-R", f"{SPECTER_USER}:{SPECTER_USER}", str(d)])
 
     ok("Directories created and ownership set")
@@ -698,6 +712,17 @@ def write_configs(report: InstallReport) -> None:
             "post_seconds": 15,
             "max_record_seconds": 300,
         },
+        "ecg_ai": {
+            "service_enabled": ECG_AI_ENABLED,
+            "inbox_dir": str(ECG_INBOX_DIR),
+            "archive_dir": str(ECG_ARCHIVE_DIR),
+            "rejected_dir": str(ECG_REJECTED_DIR),
+            "model_registry": str(CONFIG_DIR / "ecg-models.json"),
+            "poll_seconds": 5,
+            "model_timeout_seconds": 120,
+            "max_file_age_seconds": 86400,
+            "hardware_validation_status": "pending_real_biocare_ie300_xml_sample",
+        },
         "gps": {
             "device": "/dev/ttyACM0",
             "baud": 9600,
@@ -734,6 +759,19 @@ def write_configs(report: InstallReport) -> None:
     os.chmod(conf_path, 0o640)
     step(f"Main config: {conf_path}")
     report.files_deployed.append(str(conf_path))
+
+    # The shipped registry is deliberately disabled until exact model files,
+    # hashes, task labels, and isolated runtimes have been provisioned.
+    registry_source = SRC_DIR.parent / "config" / "ecg-models.json"
+    registry_destination = CONFIG_DIR / "ecg-models.json"
+    if registry_destination.exists():
+        step(f"Preserved existing ECG model registry: {registry_destination}")
+    else:
+        shutil.copy2(registry_source, registry_destination)
+        step(f"Installed disabled ECG model registry template: {registry_destination}")
+    shutil.chown(registry_destination, user=SPECTER_USER, group=SPECTER_GROUP)
+    os.chmod(registry_destination, 0o640)
+    report.files_deployed.append(str(registry_destination))
 
     # chrony GPS time sync
     chrony_snip = textwrap.dedent("""\
@@ -1025,6 +1063,32 @@ SYSTEMD_UNITS["specter-thermal.service"] = textwrap.dedent("""\
     WantedBy=multi-user.target
 """)
 
+SYSTEMD_UNITS["specter-ecg-ai.service"] = textwrap.dedent("""\
+    [Unit]
+    Description=SPECTER Offline 12-Lead ECG Research Analysis
+    After=network.target specter-mqtt.service
+    RequiresMountsFor=/mnt/specter
+
+    [Service]
+    Type=simple
+    User=specter
+    WorkingDirectory=/opt/specter
+    ExecStart=/opt/specter/venv/bin/python /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json service
+    Restart=on-failure
+    RestartSec=10
+    NoNewPrivileges=true
+    PrivateTmp=true
+    ProtectSystem=strict
+    ProtectHome=true
+    ReadWritePaths=/mnt/specter/live/ecg /mnt/specter/archive/ecg /mnt/specter/archive/ecg-rejected
+    StandardOutput=journal
+    StandardError=journal
+    SyslogIdentifier=specter-ecg-ai
+
+    [Install]
+    WantedBy=multi-user.target
+""")
+
 
 def install_systemd_units(report: InstallReport) -> None:
     banner("PHASE 8 — SYSTEMD UNITS")
@@ -1040,6 +1104,12 @@ def install_systemd_units(report: InstallReport) -> None:
     ok("systemd daemon reloaded")
 
     for unit_name in SYSTEMD_UNITS:
+        if unit_name == "specter-ecg-ai.service" and not ECG_AI_ENABLED:
+            warn(
+                "Installed specter-ecg-ai.service but left it disabled. "
+                "Provision one analysis node, then reinstall with SPECTER_ENABLE_ECG_AI=1."
+            )
+            continue
         try:
             run(["systemctl", "enable", unit_name])
             run(["systemctl", "restart", unit_name])

@@ -82,3 +82,22 @@ def test_resolved_lock_contains_only_exact_package_pins():
     ]
     assert len(requirement_lines) > 40
     assert all("==" in line.split(";", 1)[0] for line in requirement_lines)
+
+
+def test_ecg_research_stack_is_wired_but_fail_safe_by_default():
+    config = json.loads((ROOT / "specter/config/specter.json").read_text())
+    assert config["ecg_ai"]["service_enabled"] is False
+    assert config["mqtt"]["services"]["ecg_ai"]["username"] == "specter-ecg-ai"
+    registry = json.loads((ROOT / "specter/config/ecg-models.json").read_text())
+    assert {model["model_id"] for model in registry["models"]} == {
+        "deepecg-sl", "antonior92", "ecg-xplaim"
+    }
+    assert all(model["enabled"] is False for model in registry["models"])
+    assert all(model["version"] == "UNPROVISIONED" for model in registry["models"])
+    installer = (ROOT / "specter/deploy/install_specter.py").read_text()
+    assert '"ecg_ai": {' in installer
+    assert '("write", "shtf/medical/ecg_analysis/#")' in installer
+    assert 'SYSTEMD_UNITS["specter-ecg-ai.service"]' in installer
+    assert "SPECTER_ENABLE_ECG_AI" in installer
+    assert (ROOT / "specter/systemd/specter-ecg-ai.service").is_file()
+    assert (ROOT / "specter/docs/ECG_AI_IMPLEMENTATION_STATUS.md").is_file()

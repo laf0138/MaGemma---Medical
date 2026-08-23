@@ -1,0 +1,23 @@
+[Unit]
+Description=SPECTER Offline 12-Lead ECG Research Analysis
+After=network.target specter-mqtt.service
+RequiresMountsFor=/mnt/specter
+
+[Service]
+Type=simple
+User=specter
+WorkingDirectory=/opt/specter
+ExecStart=/opt/specter/venv/bin/python /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json service
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/specter/live/ecg /mnt/specter/archive/ecg /mnt/specter/archive/ecg-rejected
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=specter-ecg-ai
+
+[Install]
+WantedBy=multi-user.target
