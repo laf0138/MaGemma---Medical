@@ -28,7 +28,7 @@ START triage, but it is a memory aid for a trained responder, not instruction.
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.1.0
+Version: 1.2.0
 """
 
 import os
@@ -49,7 +49,7 @@ import paho.mqtt.client as mqtt
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -63,28 +63,24 @@ def _mqtt_client(client_id: str = ""):
 # least-privilege ACL account per service. This is the "trauma" account:
 # it can only read shtf/trauma/command/# and write the scene/casualty/
 # alert/protocol topics, so a leaked credential from any other service
-# can't forge trauma commands. Fallback values below are used only when
-# specter.json has no mqtt.services.trauma entry (e.g. running outside a
-# real install).
+# can't forge trauma commands. Runtime connections require the dedicated
+# credential and reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "trauma"
 MQTT_DEFAULT_USERNAME = "specter-trauma"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+    """Return the dedicated service credential, failing closed if absent."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
-        return (
-            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
-            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
-        )
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(
@@ -1072,6 +1068,13 @@ class SceneRegistry:
             )
             return
 
+        if not isinstance(raw, dict):
+            logger.error(
+                "Persisted scene %s has a non-object top level - starting with an EMPTY scene.",
+                self.persist_path,
+            )
+            return
+
         if raw.get("format") != 2 or not isinstance(raw.get("casualties"), dict):
             logger.error(
                 "Persisted scene %s is not in the expected format (old build, or "
@@ -1088,19 +1091,27 @@ class SceneRegistry:
         restored: Dict[str, Casualty] = {}
         for cid, cdict in raw.get("casualties", {}).items():
             try:
+                if not isinstance(cid, str) or not isinstance(cdict, dict):
+                    raise TypeError("casualty key and record must be objects")
+                raw_interventions = cdict.get("interventions", [])
+                raw_tourniquets = cdict.get("tourniquets", [])
+                if not isinstance(raw_interventions, list) or not isinstance(raw_tourniquets, list):
+                    raise TypeError("interventions and tourniquets must be arrays")
                 interventions = [
                     Intervention(**{k: v for k, v in i.items() if k in intervention_field_names})
-                    for i in cdict.get("interventions", [])
+                    for i in raw_interventions
+                    if isinstance(i, dict)
                 ]
                 tourniquets = [
                     TourniquetRecord(**{k: v for k, v in t.items() if k in tourniquet_field_names})
-                    for t in cdict.get("tourniquets", [])
+                    for t in raw_tourniquets
+                    if isinstance(t, dict)
                 ]
                 fields_only = {k: v for k, v in cdict.items() if k in casualty_field_names}
                 fields_only["interventions"] = interventions
                 fields_only["tourniquets"] = tourniquets
                 restored[cid] = Casualty(**fields_only)
-            except (TypeError, KeyError) as exc:
+            except (AttributeError, TypeError, KeyError, ValueError) as exc:
                 logger.error(
                     "Skipping unrecoverable casualty record %s in %s: %s",
                     cid, self.persist_path, exc,
@@ -1109,7 +1120,21 @@ class SceneRegistry:
         self.casualties = restored
         self.scene_active = bool(raw.get("scene_active", False))
         self.scene_opened_utc = raw.get("scene_opened_utc") or utcnow()
-        self._counter = int(raw.get("counter", len(restored)))
+        derived_counter = max(
+            (int(cid[2:]) for cid in restored if cid.startswith("C-") and cid[2:].isdigit()),
+            default=0,
+        )
+        try:
+            persisted_counter = int(raw.get("counter", derived_counter))
+            if persisted_counter < 0:
+                raise ValueError("counter must not be negative")
+        except (TypeError, ValueError):
+            logger.error(
+                "Persisted scene %s has an invalid casualty counter; derived %d from records.",
+                self.persist_path, derived_counter,
+            )
+            persisted_counter = derived_counter
+        self._counter = max(persisted_counter, derived_counter)
         logger.info(
             "Restored %d casualt%s from %s (scene_active=%s)",
             len(restored), "y" if len(restored) == 1 else "ies",
@@ -1140,14 +1165,14 @@ class TraumaService:
 
     # ---- mqtt -----------------------------------------------------------
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             logger.info("MQTT connected to %s:%s", self.mqtt_host, self.mqtt_port)
             client.subscribe(self.TOPIC_COMMAND, qos=1)
             self._publish_protocol()
             self._publish_scene()
         else:
-            logger.error("MQTT connect failed rc=%s", rc)
+            logger.error("MQTT connect failed: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -1318,7 +1343,7 @@ def main() -> None:
         return
 
     logger.info("=" * 60)
-    logger.info("SPECTER Trauma Module v1.0.0")
+    logger.info("SPECTER Trauma Module v1.2.0")
     logger.info("MQTT: %s:%s", args.mqtt_host, args.mqtt_port)
     logger.info("Scene persistence: %s", args.persist)
     logger.info("=" * 60)

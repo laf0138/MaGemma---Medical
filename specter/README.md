@@ -1,4 +1,4 @@
-# SPECTER MONSTER v1.1.0
+# SPECTER MONSTER v1.2.0
 
 Field-deployable emergency communications and medical command center.
 

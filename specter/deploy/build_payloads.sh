@@ -53,11 +53,12 @@ build_sdr() {
   systemctl stop specter-dashboard.service  2>/dev/null || true
 
   step "Creating tarball: $OUT"
-  step "  Sources: /opt/specter  /etc/specter  /etc/systemd/system/specter-*  /etc/udev/rules.d/99-specter-sdr.rules"
+  step "  Sources: /opt/specter  /etc/specter  systemd/udev rules  Nginx HTTPS site"
 
   tar --create \
       --gzip \
       --file="$TMP" \
+      --ignore-failed-read \
       --exclude="*.pyc" \
       --exclude="__pycache__" \
       --exclude="*.log" \
@@ -67,10 +68,12 @@ build_sdr() {
       /etc/specter \
       $(ls /etc/systemd/system/specter-*.service 2>/dev/null || true) \
       $(ls /etc/systemd/system/specter-*.timer   2>/dev/null || true) \
-      /etc/mosquitto/conf.d/specter.conf  2>/dev/null || true \
-      /etc/udev/rules.d/99-specter-sdr.rules 2>/dev/null || true \
-      /etc/modprobe.d/specter-rtlsdr.conf 2>/dev/null || true \
-      /etc/cron.d/specter 2>/dev/null || true \
+      /etc/mosquitto/conf.d/specter.conf \
+      /etc/nginx/sites-available/specter-dashboard \
+      /etc/nginx/sites-enabled/specter-dashboard \
+      /etc/udev/rules.d/99-specter-sdr.rules \
+      /etc/modprobe.d/specter-rtlsdr.conf \
+      /etc/cron.d/specter \
     && mv "$TMP" "$OUT" \
     || { fail "SDR tarball failed"; rm -f "$TMP"; return 1; }
 
@@ -176,7 +179,7 @@ for f in sorted(payload_dir.glob('*.tar.gz')):
     }
 
 manifest = {
-    'version': '1.0.0',
+    'version': '1.2.0',
     'built_on': '$TIMESTAMP',
     'built_by': '$HOSTNAME',
     'files': files,

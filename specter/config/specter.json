@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "project": "SPECTER Monster Emergency Communications Command Center",
   "mqtt": {
     "broker": "192.168.1.1",
@@ -9,8 +9,10 @@
     "password": "specter-change-me",
     "services": {
       "trauma":      {"username": "specter-trauma",      "password": "specter-change-me"},
+      "ward":        {"username": "specter-ward",        "password": "specter-change-me"},
       "medical_ai":  {"username": "specter-medical-ai",  "password": "specter-change-me"},
       "medical_hub": {"username": "specter-medical-hub", "password": "specter-change-me"},
+      "ecg_ai":      {"username": "specter-ecg-ai",      "password": "specter-change-me"},
       "coordinator": {"username": "specter-coordinator", "password": "specter-change-me"},
       "sdr_control": {"username": "specter-sdr-control", "password": "specter-change-me"},
       "thermal":     {"username": "specter-thermal",     "password": "specter-change-me"},
@@ -42,6 +44,17 @@
     "sample_rate": 48000,
     "channels": 1
   },
+  "ecg_ai": {
+    "service_enabled": false,
+    "inbox_dir": "/mnt/specter/live/ecg/inbox",
+    "archive_dir": "/mnt/specter/archive/ecg",
+    "rejected_dir": "/mnt/specter/archive/ecg-rejected",
+    "model_registry": "/etc/specter/ecg-models.json",
+    "poll_seconds": 5,
+    "model_timeout_seconds": 120,
+    "max_file_age_seconds": 86400,
+    "hardware_validation_status": "pending_real_biocare_ie300_xml_sample"
+  },
   "gps": {
     "device": "/dev/ttyACM0",
     "baud": 9600,
@@ -49,8 +62,10 @@
     "gpsd_port": 2947
   },
   "dashboard": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5000,
+    "cookie_secure": true,
+    "external_url": "https://192.168.1.1",
     "update_interval_ms": 250
   },
   "thermal": {

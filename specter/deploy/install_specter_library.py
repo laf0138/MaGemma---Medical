@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║         SPECTER OFFLINE AI LIBRARY — FIELD INSTALLER                        ║
-║                  install_specter_library.py  v1.0.0                         ║
+║                  install_specter_library.py  v1.2.0                         ║
 ║                                                                              ║
 ║  Zero-interaction installer for Jetson Orin Nano Super (192.168.1.5)        ║
 ║                                                                              ║
@@ -43,7 +43,7 @@ from urllib.request import urlretrieve
 from urllib.error import URLError
 
 # ─── Version & identity ───────────────────────────────────────────────────────
-VERSION       = "1.0.0"
+VERSION       = "1.2.0"
 SPECTER_USER  = "specter"
 JETSON_IP     = "192.168.1.5"
 MQTT_BROKER   = "192.168.1.1"
@@ -430,7 +430,7 @@ APT_PACKAGES = [
 ]
 
 PIP_PACKAGES = [
-    "flask", "flask-socketio", "eventlet",
+    "flask", "flask-socketio",
     "paho-mqtt", "requests",
     "numpy", "tqdm",
     "pypdf2", "pdfplumber",
@@ -1035,7 +1035,7 @@ def write_report(report: InstallReport) -> None:
         "  CLI query:    specter-ask 'How do I treat a tension pneumothorax?'",
         "  MQTT trigger: mosquitto_pub -h 192.168.1.1 -u \"$MQTT_USER\" -P \"$MQTT_PASSWORD\" \\",
         "               -t shtf/library/ask -m '{\"query\": \"fallout shelter construction\"}'",
-        "  Dashboard:    AI LIBRARY panel on 192.168.1.1:5000",
+        "  Dashboard:    AI LIBRARY panel at https://192.168.1.1",
         "",
         "═" * 70,
     ]

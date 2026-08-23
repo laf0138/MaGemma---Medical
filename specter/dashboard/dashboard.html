@@ -52,6 +52,13 @@
   #conn-status { font-size: 11px; padding: 3px 8px; border-radius: 3px; }
   #conn-status.connected    { color: var(--accent2); border: 1px solid var(--accent2); }
   #conn-status.disconnected { color: var(--danger);  border: 1px solid var(--danger); }
+  .header-actions { display:flex; align-items:center; gap:10px; }
+  .logout-button {
+    min-height:32px; padding:4px 10px; background:transparent;
+    border:1px solid var(--dim); color:var(--text); font:11px var(--font);
+    letter-spacing:1px; cursor:pointer;
+  }
+  .logout-button:focus-visible { outline:2px solid var(--warn); outline-offset:2px; }
 
   /* ── Main grid ── */
   #main {
@@ -213,7 +220,10 @@
     <div class="tagline">EMERGENCY COMMUNICATIONS COMMAND CENTER</div>
   </div>
   <div id="clock">--:--:-- UTC</div>
-  <div id="conn-status" class="disconnected">OFFLINE</div>
+  <div class="header-actions">
+    <div id="conn-status" class="disconnected">OFFLINE</div>
+    <form method="post" action="/logout"><button class="logout-button" type="submit">LOG OUT</button></form>
+  </div>
 </div>
 
 <!-- ── Main ── -->

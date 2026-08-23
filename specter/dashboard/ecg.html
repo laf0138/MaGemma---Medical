@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SPECTER · 12-LEAD ECG REVIEW</title>
+<script src="/dashboard/vendor/socket.io.min.js"></script>
+<style>
+:root{--bg:#060b0c;--panel:#0b1315;--panel2:#0e181b;--edge:#1b2a2d;--text:#c6d8d2;
+--dim:#6b847f;--green:#3fe0a0;--amber:#f0b028;--red:#ff5959;--blue:#6ba8d6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45
+'IBM Plex Mono','SFMono-Regular',Consolas,monospace;min-height:100vh}button,select{font:inherit}
+header{min-height:64px;display:flex;align-items:center;border-bottom:1px solid var(--edge);background:var(--panel)}
+.brand{padding:10px 18px;border-right:1px solid var(--edge)}.brand b{display:block;color:var(--green);font-size:17px;letter-spacing:.26em}
+.brand span,.eyebrow{color:var(--dim);font-size:9px;letter-spacing:.13em;text-transform:uppercase}
+nav{display:flex;align-self:stretch;flex:1}nav a{display:flex;align-items:center;padding:0 18px;color:var(--dim);text-decoration:none;border-right:1px solid var(--edge);font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+nav a:hover,nav a:focus{color:var(--text);background:var(--panel2)}nav a.on{color:var(--green);box-shadow:inset 0 -2px var(--green)}
+.connection{padding:8px 16px;text-align:right}.connection strong{display:block;color:var(--amber);font-size:10px;letter-spacing:.12em}.connection strong.up{color:var(--green)}
+.safety{padding:8px 16px;border-bottom:1px solid #725416;background:rgba(240,176,40,.09);color:var(--amber);font-size:11px}
+.toolbar{display:flex;gap:12px;align-items:end;padding:12px 16px;border-bottom:1px solid var(--edge);background:#081012;flex-wrap:wrap}
+.field{display:grid;gap:4px}.field label{color:var(--dim);font-size:9px;letter-spacing:.12em;text-transform:uppercase}.field select{min-width:240px;background:var(--panel);border:1px solid var(--edge);color:var(--text);padding:7px 9px}
+.record{margin-left:auto;text-align:right}.record .id{font-size:12px}.record .time{color:var(--dim);font-size:10px}.status{display:inline-block;padding:2px 7px;border:1px solid var(--edge);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.status.ok{color:var(--green);border-color:#1e8a5f}.status.warn{color:var(--amber);border-color:#6b4a0f}.status.bad{color:var(--red);border-color:#8c1f1f}
+main{padding:12px 16px;display:grid;grid-template-columns:minmax(310px,.8fr) minmax(420px,1.2fr);gap:11px;align-items:start}.stack{display:grid;gap:11px}
+.panel{background:var(--panel);border:1px solid var(--edge)}.head{display:flex;justify-content:space-between;gap:12px;padding:7px 11px;border-bottom:1px solid var(--edge);background:var(--panel2)}.head h2{margin:0;color:var(--dim);font-size:10px;letter-spacing:.14em;text-transform:uppercase}.body{padding:10px 11px;min-height:52px}
+.kv{display:grid;grid-template-columns:minmax(125px,.65fr) minmax(140px,1fr);gap:0}.kv div{padding:5px 7px;border-bottom:1px solid rgba(255,255,255,.035);overflow-wrap:anywhere}.kv .k{color:var(--dim);font-size:10px}.kv .v{font-variant-numeric:tabular-nums}
+.notice{border-left:3px solid var(--amber);padding:7px 9px;background:rgba(240,176,40,.06);color:var(--amber);font-size:11px;margin-bottom:8px}.notice.bad{border-color:var(--red);color:var(--red);background:rgba(255,89,89,.06)}
+.model{padding:9px;border:1px solid var(--edge);margin-top:7px}.model:first-child{margin-top:0}.model-title{display:flex;justify-content:space-between;gap:8px}.model-title b{color:var(--blue)}.prob{display:grid;grid-template-columns:1fr auto;gap:4px 12px;margin-top:7px}.prob .p{color:var(--green);font-variant-numeric:tabular-nums}.muted{color:var(--dim)}
+ul{margin:5px 0 0;padding-left:18px}li{margin:3px 0}.empty{padding:28px 14px;text-align:center;color:var(--dim)}
+footer{padding:9px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:10px}
+@media(max-width:900px){header{flex-wrap:wrap}.connection{margin-left:auto}nav{order:3;width:100%;height:42px;border-top:1px solid var(--edge)}main{grid-template-columns:1fr}.record{margin-left:0;text-align:left;width:100%}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>SPECTER</b><span>12-lead ECG review</span></div>
+  <nav aria-label="Primary"><a href="/resus">Resus</a><a href="/ward">Ward</a><a class="on" href="/ecg">ECG</a><a href="/">Command</a></nav>
+  <div class="connection"><strong id="connection">OFFLINE / CACHED</strong><span class="eyebrow">local mesh state</span></div>
+</header>
+<div class="safety"><b>RESEARCH DECISION SUPPORT — NOT A DIAGNOSIS.</b> Review the original tracing, lead placement, patient, and device output before acting. Missing or unavailable model output is never a negative finding.</div>
+<section class="toolbar">
+  <div class="field"><label for="patient">Patient / record</label><select id="patient" aria-label="Select ECG patient"><option value="">No ECG results received</option></select></div>
+  <div><span id="freshness" class="status warn">NO RECORD</span> <span id="quality" class="status warn">QUALITY UNKNOWN</span></div>
+  <div class="record"><div id="recordId" class="id">—</div><div id="recordTime" class="time">Waiting for a retained ECG analysis</div></div>
+</section>
+<main id="content">
+  <div class="stack">
+    <section class="panel"><div class="head"><h2>01 · Raw source</h2><span class="eyebrow">evidence layer</span></div><div id="raw" class="body empty">No structured result available.</div></section>
+    <section class="panel"><div class="head"><h2>02 · Device-generated</h2><span class="eyebrow">unverified</span></div><div id="device" class="body empty">No device output available.</div></section>
+    <section class="panel"><div class="head"><h2>03 · SPECTER-derived</h2><span class="eyebrow">experimental</span></div><div id="derived" class="body empty">No derived measurements available.</div></section>
+  </div>
+  <div class="stack">
+    <section class="panel"><div class="head"><h2>04 · Research models</h2><span class="eyebrow">probabilities, not diagnoses</span></div><div id="models" class="body empty">No research-model results available.</div></section>
+    <section class="panel"><div class="head"><h2>05 · Agreement and limitations</h2><span class="eyebrow">review required</span></div><div id="agreement" class="body empty">No comparison available.</div></section>
+    <section class="panel"><div class="head"><h2>06 · MedGemma context layer</h2><span class="eyebrow">structured explanation only</span></div><div id="medgemma" class="body empty">No context status available.</div></section>
+  </div>
+</main>
+<footer>Original waveform samples stay in the protected ECG archive and are not copied into browser memory or converted into prompt text.</footer>
+<script>
+'use strict';
+const analyses = Object.create(null);
+const $ = id => document.getElementById(id);
+const scalar = value => value === null || value === undefined || value === '' ? '—' :
+  typeof value === 'object' ? JSON.stringify(value) :
+  typeof value === 'string' ? value.replaceAll('_',' ') : String(value);
+function clear(node){while(node.firstChild) node.removeChild(node.firstChild)}
+function badge(text,tone='warn'){const n=document.createElement('span');n.className='status '+tone;n.textContent=text;return n}
+function kv(target,rows){const node=$(target);clear(node);node.className='body';const grid=document.createElement('div');grid.className='kv';
+  rows.forEach(([key,value])=>{const k=document.createElement('div');k.className='k';k.textContent=key;const v=document.createElement('div');v.className='v';v.textContent=scalar(value);grid.append(k,v)});node.appendChild(grid)}
+function list(target,heading,items,tone=''){const node=$(target);clear(node);node.className='body';if(heading){const note=document.createElement('div');note.className='notice '+tone;note.textContent=heading;node.appendChild(note)}
+  if(items.length){const ul=document.createElement('ul');items.forEach(item=>{const li=document.createElement('li');li.textContent=scalar(item);ul.appendChild(li)});node.appendChild(ul)}}
+function setStatus(node,text,tone){node.className='status '+tone;node.textContent=text}
+function render(){const patient=$('patient').value;const a=analyses[patient];if(!a)return;
+  $('recordId').textContent=(a.record_id||'unknown record')+' · '+patient;$('recordTime').textContent='Acquired '+scalar(a.acquired_at_utc)+' · processed '+scalar(a.processed_at_utc);
+  const current=a.freshness&&a.freshness.current_for_live_decisions===true;setStatus($('freshness'),current?'CURRENT':'STALE / NOT CURRENT',current?'ok':'bad');
+  const q=a.quality||{};setStatus($('quality'),'QUALITY '+String(q.status||'unknown').toUpperCase(),q.status==='pass'?'ok':'bad');
+  const source=a.source||{}, raw=(a.data_layers&&a.data_layers.raw_source)||{}, wave=raw.waveform||{};
+  kv('raw', [['Device',source.device],['Format',source.format],['SHA-256',source.sha256],['Archive status',raw.status],['Lead order',(wave.lead_order||[]).join(', ')],['Sample rate',wave.sample_rate_hz?wave.sample_rate_hz+' Hz':'—'],['Samples / lead',wave.sample_count_per_lead],['Amplitude unit',wave.unit],['Quality issues',(q.issues||[]).join('; ')||'none reported']]);
+  const machine=a.machine_output||{}, measurements=machine.measurements||{}, interpretation=machine.interpretation||[];const deviceRows=[['Attribution',machine.source_device||source.device],['Status',machine.status||'unverified_device_output']];Object.keys(measurements).sort().forEach(k=>deviceRows.push([k,measurements[k]]));deviceRows.push(['Interpretation',interpretation.join('; ')||'none supplied']);kv('device',deviceRows);
+  const derived=a.deterministic_measurements||{};const derivedRows=[['Status',derived.analysis_status],['Method',derived.method],['Source lead',derived.source_lead]];Object.keys(derived).sort().filter(k=>!['analysis_status','method','source_lead','warnings','disclaimer'].includes(k)).forEach(k=>derivedRows.push([k,derived[k]]));derivedRows.push(['Warnings',(derived.warnings||[]).join('; ')||'none reported'],['Disclaimer',derived.disclaimer]);kv('derived',derivedRows);
+  const modelNode=$('models');clear(modelNode);modelNode.className='body';(a.models||[]).forEach(model=>{const box=document.createElement('div');box.className='model';const title=document.createElement('div');title.className='model-title';const name=document.createElement('b');name.textContent=(model.display_name||model.model_id||'Unknown model')+' '+(model.version||'');title.append(name,badge(String(model.status||'unknown').toUpperCase(),model.status==='complete'?'ok':'warn'));box.appendChild(title);
+    if(model.status==='complete'){const probs=document.createElement('div');probs.className='prob';Object.entries(model.probabilities||{}).sort((x,y)=>Number(y[1])-Number(x[1])).forEach(([label,p])=>{const l=document.createElement('span');l.textContent=label;const v=document.createElement('span');v.className='p';v.textContent=Number(p).toFixed(4);probs.append(l,v)});box.appendChild(probs)}else{const reason=document.createElement('div');reason.className='muted';reason.textContent='Unavailable: '+scalar(model.error);box.appendChild(reason)}modelNode.appendChild(box)});if(!(a.models||[]).length){modelNode.className='body empty';modelNode.textContent='No configured research models reported.'}
+  const disagreements=((a.agreement||{}).disagreements)||[];list('agreement',disagreements.length?'Cross-model disagreement requires review.':'No disagreement reported; this does not establish correctness.',[...disagreements,...(a.limitations||[])],disagreements.length?'bad':'');
+  const med=(a.data_layers&&a.data_layers.medgemma_context)||{};kv('medgemma',[['Status',med.status],['Role',med.role],['Raw waveform samples sent',med.waveform_samples_sent===false?'NO':med.waveform_samples_sent],['Clinical authority','NONE — explanation/context only']]);
+}
+function refreshSelect(){const select=$('patient'),prior=select.value,keys=Object.keys(analyses).sort();clear(select);if(!keys.length){const o=document.createElement('option');o.value='';o.textContent='No ECG results received';select.appendChild(o);return}keys.forEach(key=>{const o=document.createElement('option');o.value=key;o.textContent=key+' · '+(analyses[key].record_id||'record');select.appendChild(o)});select.value=keys.includes(prior)?prior:keys[0];render()}
+function accept(patient,analysis){if(patient&&analysis&&analysis.patient_id===patient&&analysis.schema_version===1){analyses[patient]=analysis;refreshSelect()}}
+$('patient').addEventListener('change',render);
+fetch('/api/state',{credentials:'same-origin'}).then(r=>{if(!r.ok)throw new Error('state unavailable');return r.json()}).then(state=>{Object.entries(((state.medical||{}).ecg_analysis)||{}).forEach(([p,a])=>accept(p,a));}).catch(()=>{});
+const socket=io({transports:['websocket','polling']});socket.on('connect',()=>{$('connection').textContent='CONNECTED';$('connection').className='up'});socket.on('disconnect',()=>{$('connection').textContent='OFFLINE / CACHED';$('connection').className=''});socket.on('state',state=>{Object.entries(((state.medical||{}).ecg_analysis)||{}).forEach(([p,a])=>accept(p,a))});socket.on('ecg_analysis',event=>accept(event&&event.patient_id,event&&event.analysis));
+</script>
+</body>
+</html>

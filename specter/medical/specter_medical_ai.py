@@ -15,7 +15,7 @@ Model: MedGemma 4B Q4_K_M via Ollama (~1.9GB, 40-50 tok/s, 3-5s response)
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.0.0
+Version: 1.2.0
 """
 
 import os
@@ -33,11 +33,19 @@ from typing import Optional, Dict, Any, List
 import requests
 import paho.mqtt.client as mqtt
 
+from medical.clinical_scores import (
+    calculate_map,
+    calculate_news2,
+    calculate_pulse_pressure,
+    calculate_qsofa,
+    calculate_shock_index,
+)
+
 # --- paho-mqtt 1.x / 2.x compatibility -------------------------------------
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -50,28 +58,26 @@ def _mqtt_client(client_id: str = ""):
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "medical_ai" account:
 # it can only read the vitals/query/profile topics and write its own
-# diagnosis/status topics. Fallback values below are used only when
-# specter.json has no mqtt.services.medical_ai entry (e.g. running outside
-# a real install).
+# diagnosis/status topics. Runtime connections require the dedicated
+# credential and reject the installer's placeholder password.
 MQTT_SERVICE_KEY      = "medical_ai"
 MQTT_DEFAULT_USERNAME = "specter-medical-ai"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
-def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+def _mqtt_credentials() -> tuple[str, str]:
+    """Return only this service's dedicated credential, or fail closed."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
-        return (
-            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
-            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
-        )
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    if not isinstance(cfg, dict):
+        raise RuntimeError("MQTT configuration must be a JSON object")
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -258,18 +264,21 @@ class VitalsCache:
         "glucose_mg_dl": "Blood glucose",
         "ecg_rhythm": "ECG rhythm",
         "respiratory_rate": "Respiratory rate",
-        "ecg_qrs_duration_ms": "ECG QRS duration",
-        "ecg_r_wave_amplitude_uv": "ECG R-wave amplitude",
-        "ecg_t_wave_amplitude_uv": "ECG T-wave amplitude",
-        "ecg_t_r_ratio": "ECG T/R amplitude ratio",
-        "ecg_advisory_flags": "ECG advisory flags",
+        "ecg_q_s_peak_interval_ms": "ECG Q-to-S peak interval (experimental; not QRS duration)",
+        "ecg_r_wave_abs_amplitude_uv": "ECG absolute R-wave amplitude (experimental)",
+        "ecg_t_wave_abs_amplitude_uv": "ECG absolute T-wave amplitude (experimental)",
+        "ecg_t_r_abs_ratio": "ECG absolute T/R amplitude ratio (experimental)",
+        "ecg_morphology_beats_analyzed": "ECG valid Q-R-S beats analyzed",
+        "ecg_amplitude_beats_analyzed": "ECG valid R-T beats analyzed",
+        "ecg_analysis_status": "ECG analysis validation status",
+        "ecg_analysis_warnings": "ECG analysis warnings",
     }
 
     # Raw sample arrays (a full ECG waveform, a list of RR intervals) are
     # not useful dumped into a text prompt - hundreds/thousands of bare
     # numbers waste context and tell MedGemma nothing a text model can act
-    # on. See medical/ecg_analysis.py: the derived scalars (QRS duration,
-    # wave amplitudes, advisory flags) are what belong in the prompt: the
+    # on. See medical/ecg_analysis.py: the explicitly experimental derived
+    # scalars and completeness metadata are what belong in the prompt: the
     # raw waveform is future multimodal-input material, not implemented
     # here (see docs/MANUAL.md Part 7.4).
     RAW_ARRAY_READING_TYPES = {"ecg_waveform_uv", "rr_intervals_ms"}
@@ -319,6 +328,149 @@ class VitalsCache:
             return f"  (trend over last {len(recent)} readings: falling {recent[0]} -> {recent[-1]})"
         return "  (trend: stable)"
 
+    # -- Derived metrics ----------------------------------------------------
+    # See docs/SPECTER_MEDICAL_UI_BRIEF.md Part 1.3 ("Derived - computed,
+    # never entered"). NEWS2 and qSOFA both include respiration rate and/or
+    # consciousness as inputs; no BLE device wired into this build measures
+    # either, so those two scores are ALWAYS partial on this path - see
+    # clinical_scores.py's module docstring. They are still worth computing:
+    # a partial NEWS2/qSOFA that visibly lists what's missing is useful and
+    # honest; silently omitting the score entirely would hide that SPECTER
+    # *could* compute it if respiration rate/consciousness were ever wired
+    # up (e.g. a future capnometer or manual entry), and a caller who wants
+    # the number without checking `partial` deserves that to be impossible.
+
+    def fever_burden_minutes(
+        self,
+        patient_id: str,
+        threshold_c: float = 38.0,
+        window_seconds: int = 86400,
+    ) -> Optional[float]:
+        """
+        Minutes with temperature above threshold_c within the last
+        window_seconds, integrated over the retained temperature history.
+
+        Bounded by HISTORY_LIMIT (only the most recent readings are kept in
+        memory, not persisted across restarts) - if temperature is sampled
+        more often than HISTORY_LIMIT times per window, this undercounts
+        the true 24h burden. That is a real limitation of the current
+        in-memory cache, not a rounding quirk.
+        """
+        hist = self.history(patient_id, "temperature_c")
+        if not hist:
+            return None
+
+        now = datetime.now(timezone.utc)
+        points = []
+        for r in hist:
+            if not isinstance(r.value, (int, float)):
+                continue
+            try:
+                ts = datetime.fromisoformat(r.timestamp_utc)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            age = (now - ts).total_seconds()
+            if age < 0 or age > window_seconds:
+                continue
+            points.append((ts, float(r.value)))
+
+        if not points:
+            return None
+        points.sort(key=lambda p: p[0])
+
+        burden_seconds = 0.0
+        for i, (ts, value) in enumerate(points):
+            interval_end = points[i + 1][0] if i + 1 < len(points) else now
+            interval_end = min(interval_end, now)
+            span = max(0.0, (interval_end - ts).total_seconds())
+            span = min(span, window_seconds)
+            if value > threshold_c:
+                burden_seconds += span
+
+        return round(burden_seconds / 60, 1)
+
+    def delta_from_baseline(
+        self, patient_id: str, reading_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Current reading vs. the median of this reading type's retained
+        history. NOT a persisted 30-day baseline (docs/
+        SPECTER_MEDICAL_UI_BRIEF.md 1.3 specifies 30 days) - there is no
+        long-term vitals store yet, only the in-memory HISTORY_LIMIT window,
+        which resets on every service restart. Returns None until at least
+        3 numeric readings are available, so a same-session baseline is
+        never presented from a single or a pair of readings.
+        """
+        numeric = [
+            r.value for r in self.history(patient_id, reading_type)
+            if isinstance(r.value, (int, float))
+        ]
+        if len(numeric) < 3:
+            return None
+
+        current = numeric[-1]
+        pool = sorted(numeric[:-1])
+        n = len(pool)
+        median = (
+            pool[n // 2] if n % 2 == 1
+            else (pool[n // 2 - 1] + pool[n // 2]) / 2
+        )
+        return {
+            "current": current,
+            "baseline_median": round(median, 2),
+            "delta": round(current - median, 2),
+            "baseline_sample_size": n,
+        }
+
+    def derived(self, patient_id: str) -> Dict[str, Any]:
+        """All derived clinical metrics for one patient's current cache state."""
+        latest = self.latest(patient_id)
+
+        def val(key: str) -> Any:
+            reading = latest.get(key)
+            return reading.value if reading is not None else None
+
+        sbp, dbp, hr = val("bp_systolic"), val("bp_diastolic"), val("pulse")
+
+        # rr, supplemental_o2, avpu (NEWS2) and rr, altered_mentation
+        # (qSOFA) are intentionally never included: no connected device
+        # publishes them, and calculate_news2/calculate_qsofa treat an
+        # absent key as missing, never as a normal/negative reading.
+        news2_input = {
+            k: v for k, v in {
+                "spo2": val("spo2"),
+                "bp_systolic": sbp,
+                "pulse": hr,
+                "temperature_c": val("temperature_c"),
+            }.items() if v is not None
+        }
+        qsofa_input = {k: v for k, v in {"bp_systolic": sbp}.items() if v is not None}
+
+        return {
+            "map_mmhg": calculate_map(sbp, dbp),
+            "pulse_pressure_mmhg": calculate_pulse_pressure(sbp, dbp),
+            "shock_index": calculate_shock_index(hr, sbp),
+            "news2": calculate_news2(news2_input),
+            "qsofa": calculate_qsofa(qsofa_input),
+            "fever_burden_minutes_24h": self.fever_burden_minutes(patient_id),
+            "delta_from_baseline": {
+                k: delta
+                for k in ("bp_systolic", "bp_diastolic", "pulse", "spo2", "temperature_c")
+                for delta in [self.delta_from_baseline(patient_id, k)]
+                if delta is not None
+            },
+            "note": (
+                "NEWS2/qSOFA use connected-device vitals only: this build has no "
+                "respiration rate or consciousness sensor, so both scores are "
+                "always partial (see each score's missing_parameters) and must "
+                "never be read as reassuring on their own. Fever burden and "
+                f"baseline delta are bounded by the last {self.HISTORY_LIMIT} "
+                "readings held in memory, not a persisted 24h/30-day history."
+            ),
+        }
+
     def to_prompt_block(self, patient_id: str) -> str:
         latest = self.latest(patient_id)
         if not latest:
@@ -343,7 +495,7 @@ class VitalsCache:
             stale_any = stale_any or stale
             stale_txt = "  [STALE - may not reflect current state]" if stale else ""
 
-            if reading_type == "ecg_advisory_flags" and isinstance(reading.value, list):
+            if reading_type == "ecg_analysis_warnings" and isinstance(reading.value, list):
                 if not reading.value:
                     continue
                 lines.append(f"  - {label} ({age_txt}){stale_txt}:")
@@ -372,6 +524,211 @@ class VitalsCache:
                 "before acting on them."
             )
 
+        derived = self.derived(patient_id)
+        derived_lines = []
+        if derived["map_mmhg"] is not None:
+            derived_lines.append(f"  MAP: {derived['map_mmhg']} mmHg")
+        if derived["pulse_pressure_mmhg"] is not None:
+            derived_lines.append(f"  Pulse pressure: {derived['pulse_pressure_mmhg']} mmHg")
+        if derived["shock_index"] is not None:
+            derived_lines.append(f"  Shock index: {derived['shock_index']}")
+        news2 = derived["news2"]
+        if news2["per_parameter"]:
+            partial_txt = " (PARTIAL - missing: " + ", ".join(news2["missing_parameters"]) + ")" if news2["partial"] else ""
+            derived_lines.append(f"  NEWS2: {news2['total']} ({news2['risk']}){partial_txt}")
+        qsofa = derived["qsofa"]
+        if qsofa["per_parameter"]:
+            partial_txt = " (PARTIAL - missing: " + ", ".join(qsofa["missing_parameters"]) + ", cannot rule out positive)" if qsofa["partial"] else ""
+            derived_lines.append(f"  qSOFA: {qsofa['total']}{partial_txt}")
+        if derived["fever_burden_minutes_24h"] is not None:
+            derived_lines.append(f"  Fever burden (>38.0C, last 24h): {derived['fever_burden_minutes_24h']} min")
+        if derived_lines:
+            lines.append("DERIVED METRICS:")
+            lines.extend(derived_lines)
+            lines.append(
+                "  " + derived["note"]
+            )
+
+        return "\n".join(lines)
+
+
+class ECGAnalysisCache:
+    """Latest structured 12-lead result per patient.
+
+    The original waveform is consumed by the ECG models and retained in the
+    ECG archive.  It is not converted to thousands of text tokens for
+    MedGemma; complete model probabilities, device measurements, quality,
+    provenance, and disagreements are supplied instead.
+    """
+
+    MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, stale_seconds: int = 86400):
+        self._lock = threading.Lock()
+        self._latest: Dict[str, Dict[str, Any]] = {}
+        self.stale_seconds = stale_seconds
+
+    def update(self, patient_id: str, payload: Dict[str, Any]) -> bool:
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return False
+        if payload.get("patient_id") != patient_id:
+            return False
+        if payload.get("status") not in {"complete", "models_unavailable"}:
+            return False
+        if not payload.get("record_id") or not isinstance(payload.get("models"), list):
+            return False
+        try:
+            encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
+            timestamp = datetime.fromisoformat(str(payload["acquired_at_utc"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if len(encoded) > self.MAX_PAYLOAD_BYTES or timestamp.tzinfo is None:
+            return False
+        if len(payload["models"]) > 20:
+            return False
+        for model in payload["models"]:
+            if not isinstance(model, dict) or model.get("status") not in {"complete", "unavailable"}:
+                return False
+            probabilities = model.get("probabilities", {})
+            if not isinstance(probabilities, dict) or len(probabilities) > 500:
+                return False
+            findings = model.get("findings", [])
+            if not isinstance(findings, list) or any(not isinstance(item, str) for item in findings):
+                return False
+            try:
+                if any(not 0 <= float(value) <= 1 for value in probabilities.values()):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        with self._lock:
+            self._latest[patient_id] = json.loads(json.dumps(payload))
+        return True
+
+    def latest(self, patient_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            payload = self._latest.get(patient_id)
+            return json.loads(json.dumps(payload)) if payload is not None else None
+
+    @staticmethod
+    def _age_seconds(payload: Dict[str, Any]) -> float:
+        try:
+            timestamp = datetime.fromisoformat(str(payload["acquired_at_utc"]).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                return float("inf")
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+            return age if age >= 0 else float("inf")
+        except (KeyError, TypeError, ValueError):
+            return float("inf")
+
+    def to_prompt_block(self, patient_id: str) -> str:
+        payload = self.latest(patient_id)
+        if payload is None:
+            return (
+                "12-LEAD ECG RESEARCH ANALYSIS: none received. Do not infer a "
+                "12-lead result from the single-lead Polar H10 waveform."
+            )
+        age = self._age_seconds(payload)
+        age_text = f"{age / 3600:.1f}h ago" if age != float("inf") else "invalid/future timestamp"
+        lines = [
+            "12-LEAD ECG RESEARCH ANALYSIS (not a diagnosis):",
+            f"  Record: {payload.get('record_id')} acquired {payload.get('acquired_at_utc')} "
+            f"({age_text})",
+            f"  Freshness: {'STALE - do not treat as current' if age > self.stale_seconds else 'within configured window'}",
+        ]
+        quality = payload.get("quality", {})
+        lines.append(f"  Signal quality gate: {quality.get('status', 'unknown')}")
+        for issue in quality.get("issues", []):
+            lines.append(f"    - {issue}")
+        acquisition = payload.get("acquisition_metadata", {})
+        relevant_metadata = {
+            key: value for key, value in acquisition.items()
+            if any(token in key.lower() for token in (
+                "filter", "calibr", "sensitivity", "samplerate", "samplingrate",
+                "device", "model", "firmware", "leadmode", "paperspeed",
+            ))
+        }
+        if relevant_metadata:
+            lines.append("  Acquisition settings/provenance:")
+            for key, value in sorted(relevant_metadata.items()):
+                lines.append(f"    - {key}: {value}")
+        machine = payload.get("machine_output", {})
+        source_device = str(
+            machine.get("source_device")
+            or payload.get("source", {}).get("device")
+            or "source device"
+        )
+        source_format = str(
+            machine.get("source_format")
+            or payload.get("source", {}).get("format")
+            or "unknown format"
+        )
+        measurements = machine.get("measurements", {})
+        if measurements:
+            lines.append(
+                f"  {source_device} measurements "
+                f"(unverified device output; source format {source_format}):"
+            )
+            for key, value in sorted(measurements.items()):
+                lines.append(f"    - {key}: {value}")
+        interpretations = machine.get("interpretation", [])
+        if interpretations:
+            lines.append(
+                f"  {source_device} interpretation "
+                "(unverified; must review the original tracing):"
+            )
+            lines.extend(f"    - {item}" for item in interpretations)
+        data_layers = payload.get("data_layers", {})
+        if data_layers:
+            lines.append("  Data-layer attribution:")
+            for layer_name in (
+                "raw_source", "device_generated", "specter_derived",
+                "research_models", "medgemma_context",
+            ):
+                layer = data_layers.get(layer_name)
+                if isinstance(layer, dict):
+                    lines.append(
+                        f"    - {layer_name}: {layer.get('status', 'unknown')}"
+                    )
+        deterministic = payload.get("deterministic_measurements", {})
+        if deterministic:
+            lines.append(
+                "  Deterministic lead-II measurements "
+                f"({deterministic.get('analysis_status', 'status unknown')}):"
+            )
+            excluded = {"disclaimer", "warnings", "analysis_status", "method", "source_lead", "source_unit"}
+            for key, value in sorted(deterministic.items()):
+                if key not in excluded:
+                    lines.append(f"    - {key}: {value}")
+            for warning in deterministic.get("warnings", []):
+                lines.append(f"    - WITHHELD/WARNING: {warning}")
+            if deterministic.get("disclaimer"):
+                lines.append("    " + str(deterministic["disclaimer"]))
+        for model in payload.get("models", []):
+            name = model.get("display_name") or model.get("model_id", "unknown model")
+            lines.append(
+                f"  {name} {model.get('version', '')}: {model.get('status', 'unknown')} "
+                f"[artifact {str(model.get('artifact_sha256', ''))[:12]}]"
+            )
+            if model.get("status") != "complete":
+                lines.append(f"    unavailable reason: {model.get('error', 'not reported')}")
+                continue
+            probabilities = model.get("probabilities", {})
+            for label, probability in sorted(probabilities.items(), key=lambda pair: (-float(pair[1]), pair[0])):
+                lines.append(f"    - {label}: probability {float(probability):.4f}")
+            findings = model.get("findings", [])
+            if model.get("thresholds_applied"):
+                lines.append("    thresholded research flags: " + (", ".join(findings) if findings else "none"))
+            else:
+                lines.append("    thresholded research flags: WITHHELD - no registered thresholds")
+            explanation = model.get("explanation")
+            if explanation:
+                lines.append("    explainability output: " + json.dumps(explanation, sort_keys=True)[:4000])
+        disagreement = payload.get("agreement", {}).get("disagreements", [])
+        lines.append("  Cross-model disagreements: " + (", ".join(disagreement) if disagreement else "none reported"))
+        lines.append(
+            "  Use these outputs only to suggest questions and priorities. Never convert a "
+            "model probability into a diagnosis, and never treat an unavailable model as negative."
+        )
         return "\n".join(lines)
 
 
@@ -500,9 +857,15 @@ question actually asked."""
 
 
 class PromptBuilder:
-    def __init__(self, vitals: VitalsCache, profiles: Dict[str, PatientProfile]):
+    def __init__(
+        self,
+        vitals: VitalsCache,
+        profiles: Dict[str, PatientProfile],
+        ecg_analyses: Optional[ECGAnalysisCache] = None,
+    ):
         self.vitals = vitals
         self.profiles = profiles
+        self.ecg_analyses = ecg_analyses or ECGAnalysisCache()
 
     def profile_for(self, patient_id: str) -> PatientProfile:
         return self.profiles.get(
@@ -523,6 +886,8 @@ class PromptBuilder:
             self.profile_for(patient_id).to_prompt_block(),
             "",
             self.vitals.to_prompt_block(patient_id),
+            "",
+            self.ecg_analyses.to_prompt_block(patient_id),
             "",
             retriever.to_prompt_block(passages),
         ]
@@ -561,7 +926,13 @@ class OllamaClient:
             r.raise_for_status()
             names = [m.get("name", "") for m in r.json().get("models", [])]
             base = self.cfg.model.split(":")[0]
-            return any(n == self.cfg.model or n.startswith(base) for n in names)
+            # A prefix check incorrectly accepted similarly named models such
+            # as ``medgemma2`` for ``medgemma``. Tags may differ, but the base
+            # model name must match exactly.
+            return any(
+                n == self.cfg.model or n.split(":", 1)[0] == base
+                for n in names
+            )
         except Exception:
             return False
 
@@ -605,13 +976,15 @@ class MedicalAIEngine:
     TOPIC_VITALS = "shtf/medical/vitals/#"
     TOPIC_QUERY = "shtf/medical/query/#"
     TOPIC_PROFILE = "shtf/medical/profile/#"
+    TOPIC_ECG_ANALYSIS = "shtf/medical/ecg_analysis/#"
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.vitals = VitalsCache(stale_seconds=cfg.vitals_stale_seconds)
+        self.ecg_analyses = ECGAnalysisCache()
         self.profiles = default_profiles()
         self.retriever = GuidelineRetriever(cfg)
-        self.prompts = PromptBuilder(self.vitals, self.profiles)
+        self.prompts = PromptBuilder(self.vitals, self.profiles, self.ecg_analyses)
         self.ollama = OllamaClient(cfg)
 
         self.mqtt = _mqtt_client("specter-medical-ai")
@@ -625,22 +998,29 @@ class MedicalAIEngine:
 
     # -- MQTT lifecycle ----------------------------------------------------
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             self.connected = True
             logger.info("MQTT connected to %s:%s", self.cfg.mqtt_host, self.cfg.mqtt_port)
             client.subscribe(self.TOPIC_VITALS, qos=1)
             client.subscribe(self.TOPIC_QUERY, qos=1)
             client.subscribe(self.TOPIC_PROFILE, qos=1)
+            client.subscribe(self.TOPIC_ECG_ANALYSIS, qos=1)
             self._publish_status("online")
         else:
             self.connected = False
-            logger.error("MQTT connection failed, rc=%s", rc)
+            logger.error("MQTT connection failed: %s", reason_code)
 
-    def _on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(
+        self, client, userdata, disconnect_flags_or_reason_code,
+        reason_code=None, properties=None,
+    ):
+        reason_code = (
+            disconnect_flags_or_reason_code if reason_code is None else reason_code
+        )
         self.connected = False
-        if rc != 0:
-            logger.warning("MQTT disconnected unexpectedly, rc=%s", rc)
+        if reason_code != 0:
+            logger.warning("MQTT disconnected unexpectedly: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
@@ -656,6 +1036,8 @@ class MedicalAIEngine:
             self._handle_query(topic, payload)
         elif topic.startswith("shtf/medical/profile/"):
             self._handle_profile(topic, payload)
+        elif topic.startswith("shtf/medical/ecg_analysis/"):
+            self._handle_ecg_analysis(topic, payload)
 
     # -- Handlers ----------------------------------------------------------
 
@@ -680,6 +1062,9 @@ class MedicalAIEngine:
             )
         elif len(parts) >= 5:
             self._store_reading(patient_id, payload, reading_type=parts[4])
+        else:
+            return
+        self._publish_derived(patient_id)
 
     def _store_reading(
         self,
@@ -721,6 +1106,16 @@ class MedicalAIEngine:
         self.profiles[patient_id] = prof
         self.prompts.profiles = self.profiles
         logger.info("Updated profile for %s", patient_id)
+
+    def _handle_ecg_analysis(self, topic: str, payload: Dict[str, Any]) -> None:
+        parts = topic.split("/")
+        if len(parts) != 4:
+            return
+        patient_id = parts[3]
+        if not self.ecg_analyses.update(patient_id, payload):
+            logger.warning("Rejected malformed or mismatched ECG analysis for %s", patient_id)
+            return
+        logger.info("Cached 12-lead ECG analysis for %s", patient_id)
 
     def _handle_query(self, topic: str, payload: Dict[str, Any]) -> None:
         parts = topic.split("/")
@@ -822,6 +1217,7 @@ class MedicalAIEngine:
             "error": error,
             "model": self.cfg.model,
             "vitals_used": vitals_snapshot,
+            "ecg_analysis_used": self.ecg_analyses.latest(patient_id),
             "sources": [
                 {"source": p["source"], "page": p.get("page")} for p in (passages or [])
             ],
@@ -844,6 +1240,16 @@ class MedicalAIEngine:
         }
         payload.update(extra)
         self.mqtt.publish("shtf/medical/ai/status", json.dumps(payload), qos=1)
+
+    def _publish_derived(self, patient_id: str) -> None:
+        """Per docs/SPECTER_MEDICAL_UI_BRIEF.md 1.3: derived metrics get
+        their own retained topic so a dashboard can render them without
+        recomputing from raw vitals itself."""
+        payload = dict(self.vitals.derived(patient_id))
+        payload["patient_id"] = patient_id
+        payload["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+        topic = f"shtf/medical/derived/{patient_id}"
+        self.mqtt.publish(topic, json.dumps(payload), qos=1, retain=True)
 
     # -- Run ---------------------------------------------------------------
 
@@ -911,23 +1317,27 @@ def main() -> None:
         # One-shot mode: connect briefly to absorb retained vitals, then answer.
         engine.mqtt.connect(cfg.mqtt_host, cfg.mqtt_port, keepalive=60)
         engine.mqtt.loop_start()
-        time.sleep(2)  # allow retained vitals messages to arrive
-        passages = engine.retriever.retrieve(args.ask, n_results=4)
-        prompt = engine.prompts.build(
-            patient_id=args.patient,
-            user_query=args.ask,
-            passages=passages,
-            retriever=engine.retriever,
-        )
-        print("\n" + "=" * 70)
-        print(engine.ollama.generate(prompt))
-        print("=" * 70 + "\n")
-        engine.mqtt.loop_stop()
-        engine.mqtt.disconnect()
+        try:
+            time.sleep(2)  # allow retained vitals messages to arrive
+            passages = engine.retriever.retrieve(args.ask, n_results=4)
+            prompt = engine.prompts.build(
+                patient_id=args.patient,
+                user_query=args.ask,
+                passages=passages,
+                retriever=engine.retriever,
+            )
+            print("\n" + "=" * 70)
+            print(engine.ollama.generate(prompt))
+            print("=" * 70 + "\n")
+        finally:
+            # One-shot inference failures must not leave the MQTT network
+            # thread or connection running in the caller's process.
+            engine.mqtt.loop_stop()
+            engine.mqtt.disconnect()
         return
 
     logger.info("=" * 60)
-    logger.info("SPECTER Medical AI Engine v1.0.0")
+    logger.info("SPECTER Medical AI Engine v1.2.0")
     logger.info("MQTT:   %s:%s", cfg.mqtt_host, cfg.mqtt_port)
     logger.info("Ollama: %s (model=%s)", cfg.ollama_host, cfg.model)
     logger.info("Kiwix:  %s", cfg.kiwix_host)

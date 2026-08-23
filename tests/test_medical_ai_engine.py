@@ -11,6 +11,7 @@ import json
 import pytest
 import requests
 
+import medical.specter_medical_ai as medical_ai_mod
 from medical.specter_medical_ai import Config, MedicalAIEngine
 
 
@@ -37,6 +38,7 @@ class SyncThread:
 
 @pytest.fixture
 def engine(monkeypatch):
+    monkeypatch.setattr(medical_ai_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     cfg = Config(chroma_path="/does/not/exist")
     eng = MedicalAIEngine(cfg)
     eng.mqtt = FakeMQTT()
@@ -96,6 +98,30 @@ class TestHandleVitals:
         })
         assert engine.vitals.latest("operator") == {}
 
+    def test_vitals_snapshot_triggers_derived_metrics_publish(self, engine):
+        engine._handle_vitals("shtf/medical/vitals/operator", {
+            "readings": [
+                {"reading_type": "bp_systolic", "value": 120, "unit": "mmHg"},
+                {"reading_type": "bp_diastolic", "value": 80, "unit": "mmHg"},
+            ]
+        })
+        derived_calls = [
+            c for c in engine.mqtt.published
+            if c[0] == "shtf/medical/derived/operator"
+        ]
+        assert len(derived_calls) == 1
+        topic, payload, qos, retain = derived_calls[0]
+        body = json.loads(payload)
+        assert body["map_mmhg"] == pytest.approx(93.3)
+        assert body["patient_id"] == "operator"
+        assert retain is True
+
+    def test_short_topic_does_not_publish_derived_metrics(self, engine):
+        engine._handle_vitals("shtf/medical/vitals", {"value": 1})
+        assert not any(
+            c[0].startswith("shtf/medical/derived/") for c in engine.mqtt.published
+        )
+
     def test_ecg_analysis_readings_flow_through_to_the_built_prompt(self, engine):
         # A realistic snapshot payload shaped like what medical_hub.py's
         # _collect_polar_h10_stream + ecg_analysis.py actually publish -
@@ -103,11 +129,11 @@ class TestHandleVitals:
         engine._handle_vitals("shtf/medical/vitals/operator", {
             "readings": [
                 {"reading_type": "ecg_waveform_uv", "value": list(range(500)), "unit": "uV"},
-                {"reading_type": "ecg_qrs_duration_ms", "value": 145.0, "unit": "ms"},
-                {"reading_type": "ecg_t_r_ratio", "value": 0.8, "unit": "ratio"},
+                {"reading_type": "ecg_q_s_peak_interval_ms", "value": 84.6, "unit": "ms"},
+                {"reading_type": "ecg_t_r_abs_ratio", "value": 0.8, "unit": "ratio"},
                 {
-                    "reading_type": "ecg_advisory_flags",
-                    "value": ["QRS duration 145ms is above the 120ms widened-QRS threshold."],
+                    "reading_type": "ecg_analysis_status",
+                    "value": "experimental_not_clinically_validated",
                     "unit": "text",
                 },
             ]
@@ -118,9 +144,9 @@ class TestHandleVitals:
             passages=[], retriever=engine.retriever,
         )
 
-        assert "ECG QRS duration: 145.0 ms" in prompt
-        assert "ECG T/R amplitude ratio: 0.8 ratio" in prompt
-        assert "QRS duration 145ms is above the 120ms widened-QRS threshold" in prompt
+        assert "ECG Q-to-S peak interval (experimental; not QRS duration): 84.6 ms" in prompt
+        assert "ECG absolute T/R amplitude ratio (experimental): 0.8 ratio" in prompt
+        assert "experimental_not_clinically_validated" in prompt
         # The raw waveform must never be dumped into the text prompt.
         assert "ecg_waveform_uv" not in prompt
         assert str(list(range(500))) not in prompt

@@ -127,6 +127,33 @@
 
 ---
 
+## CANONICAL 12-LEAD ECG SOFTWARE / AI STACK (LOCKED)
+
+The following seven-part combination is the selected SPECTER 12-lead ECG path. Selection
+does not mean installed, clinically validated, or cleared for diagnostic use.
+
+| # | Component | Locked role | Deployment status | Safety / validation status |
+|---:|---|---|---|---|
+| 1 | **Biocare iE300** | Physical 12-lead waveform acquisition and source report | Strict XML acquisition boundary, immutable raw archive and canonical 12-lead record are implemented; **real vendor XML/firmware validation is pending** | The importer fails closed when lead order, units, gain, sample rate, duration or timestamp is missing/ambiguous. A PDF or photograph is display evidence, not model input |
+| 2 | **[DeepECG-SL](https://github.com/HeartWise-AI/DeepECG_Docker)** | **Primary research 12-lead classifier**; produces multi-label probabilities | Exact 250 Hz/2,500-sample/77-label/scaling contract and isolated TorchScript adapter are integrated; model remains disabled until exact weights/hash are provisioned | The inspected EfficientNet release has no published thresholds, so SPECTER preserves probabilities and refuses to invent positive flags |
+| 3 | **[AntonioR92 automatic ECG diagnosis](https://github.com/antonior92/automatic-ecg-diagnosis)** | Initial six-label regression baseline for 1st-degree AV block, RBBB, LBBB, sinus bradycardia, AF and sinus tachycardia | Exact 400 Hz/4,096-sample contract, symmetric padding, labels/thresholds and isolated legacy TensorFlow adapter are integrated; weights/runtime remain unprovisioned | Baseline/comparator only, never a tie-breaker or clinical authority. Overlapping labels generate an explicit agreement/disagreement record |
+| 4 | **[ECG-XPLAIM](https://github.com/gerard-raffy/ECG-XPLAIM)** | Later explainable secondary classifier | Isolated adapter and bounded explanation contract are integrated but disabled; the exact task, labels and weights must replace the obvious placeholder before enablement | Research aid only. SPECTER labels its generic gradient summary separately and does not misrepresent it as the publication method |
+| 5 | **[PTB-XL](https://physionet.org/content/ptb-xl/1.0.3/) plus other external datasets** | Versioned integration, regression, calibration, subgroup and out-of-distribution corpus | Dataset manifest/version/license/hash validation and patient-level split-leak detection are implemented; datasets are not redistributed or downloaded | Public retrospective data cannot validate the Biocare chain or field population. Acquisition/licensing and frozen evaluation runs remain commissioning work |
+| 6 | **MedGemma 4B** | Constrained explanation, retrieval-grounded context and operator summary | Retained ECG-analysis subscription, cache, complete structured-probability/quality/provenance/disagreement prompt block and diagnosis audit snapshot are integrated | It never receives a textual raw-sample dump, changes probabilities, hides disagreement or treats an unavailable model as a negative result |
+| 7 | **[ExChanGeAI](https://github.com/VargheseLab/exchangeai) concepts** | Evaluation workflow and ONNX model registry/version/exchange patterns | Offline hash-pinned atomic registry is implemented. ONNX entries require opset, input/output names and source-artifact lineage; generic ONNX Runtime execution is isolated | No automatic download/conversion/fine-tuning. Field data can never trigger training, and a registry entry is not clinical validation |
+
+Locked order of operations is: Biocare acquisition -> acquisition-file validation ->
+signal-quality gate -> deterministic measurements -> DeepECG-SL primary inference ->
+AntonioR92 regression comparison -> optional/later ECG-XPLAIM secondary inference ->
+explicit agreement/disagreement record -> constrained MedGemma summary. PTB-XL and the
+other external corpora validate the pipeline; ExChanGeAI concepts govern reproducible model
+evaluation and ONNX lifecycle management. No component may convert missing, corrupt,
+mis-scaled, or wrong-lead data into a clinical-looking result. Until hardware-specific and
+clinician-reviewed validation is complete, every model output is **RESEARCH ONLY / NOT FOR
+DIAGNOSIS**.
+
+---
+
 ## KEY DESIGN DECISIONS (LOCKED)
 
 ✅ **AI accelerators:** Two Hailo-10H (40 TOPS each) on Node 1 & 2 Pi 5s for parallel signal classification + medical AI  

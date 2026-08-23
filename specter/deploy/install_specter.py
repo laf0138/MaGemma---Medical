@@ -22,6 +22,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -31,8 +32,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from .dashboard_tls import nginx_site_config, openssl_certificate_command
+except ImportError:  # Direct execution: python3 install_specter.py
+    from dashboard_tls import nginx_site_config, openssl_certificate_command
+
 # ─── Version ──────────────────────────────────────────────────────────────────
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 SPECTER_USER  = "specter"
 SPECTER_GROUP = "specter"
 
@@ -54,6 +60,9 @@ MQTT_DEFAULT_USERNAME = "specter-operator"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 MQTT_USERNAME = os.environ.get("SPECTER_MQTT_USER", MQTT_DEFAULT_USERNAME)
 MQTT_PASSWORD = os.environ.get("SPECTER_MQTT_PASSWORD", MQTT_DEFAULT_PASSWORD)
+DASHBOARD_USERNAME = os.environ.get("SPECTER_DASHBOARD_USER", "specter-admin")
+DASHBOARD_PASSWORD = os.environ.get("SPECTER_DASHBOARD_PASSWORD", "")
+ECG_AI_ENABLED = os.environ.get("SPECTER_ENABLE_ECG_AI", "").strip().lower() in {"1", "true", "yes"}
 
 # service key -> (mqtt username, ACL rules). Rules are (permission, topic)
 # pairs using standard MQTT ACL wildcards (+ single level, # multi-level).
@@ -68,14 +77,46 @@ MQTT_SERVICES: dict[str, dict] = {
             ("write", "shtf/trauma/protocol"),
         ],
     },
+    "ward": {
+        "username": "specter-ward",
+        "acl": [
+            ("read", "shtf/ward/command/#"),
+            ("write", "shtf/ward/episode"),
+            ("write", "shtf/ward/episode/#"),
+            ("write", "shtf/ward/alert"),
+        ],
+    },
+    "mesh": {
+        "username": "specter-mesh",
+        "acl": [
+            # Read-only on every alert source it relays - it can observe
+            # trauma/ward/system alarms but cannot write into any of them,
+            # so a leaked mesh credential can't forge a casualty or ward
+            # state. shtf/mesh/command/# is its own narrow inbound channel
+            # for operator-composed outbound mesh messages.
+            ("read", "shtf/trauma/alert"),
+            ("read", "shtf/ward/alert"),
+            ("read", "shtf/system/alarm"),
+            ("read", "shtf/mesh/command/#"),
+            ("write", "shtf/mesh/status"),
+            ("write", "shtf/mesh/sent"),
+            ("write", "shtf/mesh/inbound"),
+        ],
+    },
     "medical_ai": {
         "username": "specter-medical-ai",
         "acl": [
             ("read", "shtf/medical/vitals/#"),
             ("read", "shtf/medical/query/#"),
             ("read", "shtf/medical/profile/#"),
+            ("read", "shtf/medical/ecg_analysis/#"),
             ("write", "shtf/medical/diagnosis/#"),
             ("write", "shtf/medical/ai/status"),
+            # MAP/pulse pressure/shock index/NEWS2/qSOFA/fever burden/
+            # delta-from-baseline (VitalsCache.derived(), see
+            # medical/clinical_scores.py) - a distinct topic from
+            # diagnosis/# above, so it needs its own explicit grant.
+            ("write", "shtf/medical/derived/#"),
         ],
     },
     "medical_hub": {
@@ -83,6 +124,14 @@ MQTT_SERVICES: dict[str, dict] = {
         "acl": [
             ("read", "shtf/medical/hub/command/#"),
             ("write", "shtf/medical/vitals/#"),
+        ],
+    },
+    "ecg_ai": {
+        "username": "specter-ecg-ai",
+        "acl": [
+            ("read", "shtf/medical/ecg/command"),
+            ("write", "shtf/medical/ecg/status"),
+            ("write", "shtf/medical/ecg_analysis/#"),
         ],
     },
     "coordinator": {
@@ -115,9 +164,10 @@ MQTT_SERVICES: dict[str, dict] = {
     "dashboard": {
         "username": "specter-dashboard",
         "acl": [
-            # Same reasoning as coordinator: broad READ to drive the UI,
-            # zero WRITE - a leaked dashboard credential can only observe.
+            # Broad READ drives the UI. The one narrow WRITE exception is
+            # WARD's authenticated, allowlisted browser command path.
             ("read", "shtf/#"),
+            ("write", "shtf/ward/command/#"),
         ],
     },
     "library_api": {
@@ -149,6 +199,19 @@ def _derive_service_password(master_password: str, service: str) -> str:
     import hashlib
     return hashlib.sha256(f"{master_password}:{service}".encode()).hexdigest()[:24]
 
+
+def _hash_dashboard_password(password: str) -> str:
+    """Create the PBKDF2 format consumed by dashboard_server.py."""
+    import hashlib
+    if len(password) < 12:
+        raise ValueError("dashboard password must contain at least 12 characters")
+    iterations = 600_000
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("ascii"), iterations
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
 # ─── Install paths ────────────────────────────────────────────────────────────
 BASE_DIR    = Path("/opt/specter")
 CONFIG_DIR  = Path("/etc/specter")
@@ -156,8 +219,17 @@ LOG_DIR     = Path("/var/log/specter")
 RUN_DIR     = Path("/run/specter")
 RECORD_DIR  = Path("/mnt/specter/live/recordings")
 ARCHIVE_DIR = Path("/mnt/specter/archive")
+ECG_INBOX_DIR = Path("/mnt/specter/live/ecg/inbox")
+ECG_ARCHIVE_DIR = ARCHIVE_DIR / "ecg"
+ECG_REJECTED_DIR = ARCHIVE_DIR / "ecg-rejected"
 VENV_DIR    = BASE_DIR / "venv"
 SCRIPTS_DIR = BASE_DIR / "scripts"
+TLS_DIR     = CONFIG_DIR / "tls"
+DASHBOARD_CERT = TLS_DIR / "dashboard.crt"
+DASHBOARD_KEY  = TLS_DIR / "dashboard.key"
+DASHBOARD_FINGERPRINT = TLS_DIR / "dashboard.sha256"
+NGINX_SITE = Path("/etc/nginx/sites-available/specter-dashboard")
+NGINX_ENABLED = Path("/etc/nginx/sites-enabled/specter-dashboard")
 
 SRC_DIR = Path(__file__).parent   # directory containing this installer
 
@@ -185,7 +257,7 @@ APT_PACKAGES = [
     "screen", "tmux", "htop", "iotop", "lsof",
     "jq", "bc", "rsync",
     # Web server (dashboard)
-    "nginx",
+    "nginx", "openssl",
     # Build tools
     "build-essential", "cmake", "pkg-config",
     # SoapySDR
@@ -194,17 +266,17 @@ APT_PACKAGES = [
 
 # Pinned where this repo's own test suite (requirements-dev.txt) actually
 # exercises the package - an unpinned install months from now can pull a
-# materially different, untested version onto a field kit. scipy/
-# soundfile/pyaudio/pyserial/gps3/matplotlib are real Pi-hardware
-# dependencies (audio capture, GPS, RF plotting) this repo's test suite
-# doesn't cover, so they aren't pinned here yet - do that once they have
-# their own verified-version pass, don't guess.
+# materially different, untested version onto a field kit. soundfile,
+# pyaudio, pyserial, and gps3 are real Pi-hardware dependencies this repo's
+# test suite does not exercise, so they remain explicitly unpinned pending
+# a real-hardware verified-version pass.
 PIP_PACKAGES = [
-    "numpy==2.4.6", "scipy", "soundfile", "pyaudio",
+    "numpy==2.4.6", "scipy==1.17.1", "soundfile", "pyaudio",
     "paho-mqtt==2.1.0", "flask==3.1.3", "flask-socketio==5.6.1",
-    "eventlet==0.41.2", "requests==2.33.1",
+    "requests==2.33.1",
     "pyserial", "gps3",
-    "matplotlib",
+    "matplotlib==3.11.1",
+    "meshtastic==2.7.11",
 ]
 
 # ─── Logger ───────────────────────────────────────────────────────────────────
@@ -462,6 +534,7 @@ def create_user_and_dirs(report: InstallReport) -> None:
     dirs = [
         BASE_DIR, CONFIG_DIR, LOG_DIR, SCRIPTS_DIR,
         RECORD_DIR, ARCHIVE_DIR,
+        ECG_INBOX_DIR, ECG_ARCHIVE_DIR, ECG_REJECTED_DIR,
         Path("/mnt/specter/live"),
     ]
     for d in dirs:
@@ -470,7 +543,7 @@ def create_user_and_dirs(report: InstallReport) -> None:
         report.files_deployed.append(str(d))
 
     # Ownership
-    for d in [BASE_DIR, LOG_DIR, RECORD_DIR, ARCHIVE_DIR]:
+    for d in [BASE_DIR, LOG_DIR, RECORD_DIR, ARCHIVE_DIR, ECG_INBOX_DIR, ECG_ARCHIVE_DIR, ECG_REJECTED_DIR]:
         run(["chown", "-R", f"{SPECTER_USER}:{SPECTER_USER}", str(d)])
 
     ok("Directories created and ownership set")
@@ -639,6 +712,17 @@ def write_configs(report: InstallReport) -> None:
             "post_seconds": 15,
             "max_record_seconds": 300,
         },
+        "ecg_ai": {
+            "service_enabled": ECG_AI_ENABLED,
+            "inbox_dir": str(ECG_INBOX_DIR),
+            "archive_dir": str(ECG_ARCHIVE_DIR),
+            "rejected_dir": str(ECG_REJECTED_DIR),
+            "model_registry": str(CONFIG_DIR / "ecg-models.json"),
+            "poll_seconds": 5,
+            "model_timeout_seconds": 120,
+            "max_file_age_seconds": 86400,
+            "hardware_validation_status": "pending_real_biocare_ie300_xml_sample",
+        },
         "gps": {
             "device": "/dev/ttyACM0",
             "baud": 9600,
@@ -646,9 +730,18 @@ def write_configs(report: InstallReport) -> None:
             "gpsd_port": 2947,
         },
         "dashboard": {
-            "host": "0.0.0.0",
+            # The application server is intentionally unreachable from the
+            # LAN. Nginx is the sole public entry point and terminates TLS.
+            "host": "127.0.0.1",
             "port": 5000,
             "update_interval_ms": 250,
+            "secret_key": secrets.token_hex(32),
+            "cookie_secure": True,
+            "external_url": f"https://{report.hardware.ip_address}",
+            "auth": {
+                "username": DASHBOARD_USERNAME,
+                "password_hash": _hash_dashboard_password(DASHBOARD_PASSWORD),
+            },
         },
         "thermal": {
             "idle_max_c": 45,
@@ -667,6 +760,19 @@ def write_configs(report: InstallReport) -> None:
     step(f"Main config: {conf_path}")
     report.files_deployed.append(str(conf_path))
 
+    # The shipped registry is deliberately disabled until exact model files,
+    # hashes, task labels, and isolated runtimes have been provisioned.
+    registry_source = SRC_DIR.parent / "config" / "ecg-models.json"
+    registry_destination = CONFIG_DIR / "ecg-models.json"
+    if registry_destination.exists():
+        step(f"Preserved existing ECG model registry: {registry_destination}")
+    else:
+        shutil.copy2(registry_source, registry_destination)
+        step(f"Installed disabled ECG model registry template: {registry_destination}")
+    shutil.chown(registry_destination, user=SPECTER_USER, group=SPECTER_GROUP)
+    os.chmod(registry_destination, 0o640)
+    report.files_deployed.append(str(registry_destination))
+
     # chrony GPS time sync
     chrony_snip = textwrap.dedent("""\
         # SPECTER GPS time source
@@ -681,7 +787,109 @@ def write_configs(report: InstallReport) -> None:
 
     ok("Config files written")
 
-# ─── Phase 7: Systemd units ───────────────────────────────────────────────────
+# ─── Phase 7: Dashboard TLS ───────────────────────────────────────────────────
+
+def configure_dashboard_tls(report: InstallReport) -> None:
+    """Install a stable local certificate and HTTPS-only Nginx proxy.
+
+    The private key never leaves /etc/specter/tls. Existing complete key/cert
+    pairs are preserved across reinstalls so operator trust and the published
+    fingerprint do not change unexpectedly.
+    """
+    banner("PHASE 7 — DASHBOARD TLS")
+    TLS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(TLS_DIR, 0o700)
+
+    cert_tmp = DASHBOARD_CERT.with_suffix(".crt.tmp")
+    key_tmp = DASHBOARD_KEY.with_suffix(".key.tmp")
+    try:
+        reuse_existing = DASHBOARD_CERT.exists() and DASHBOARD_KEY.exists()
+        if reuse_existing:
+            try:
+                # Preserve trust only when the pair is valid, matched, not
+                # about to expire, and still covers this node's current IP.
+                run([
+                    "openssl", "x509", "-in", str(DASHBOARD_CERT),
+                    "-noout", "-checkend", "86400",
+                ])
+                run([
+                    "openssl", "x509", "-in", str(DASHBOARD_CERT),
+                    "-noout", "-checkip", report.hardware.ip_address,
+                ])
+                cert_public = run([
+                    "openssl", "x509", "-in", str(DASHBOARD_CERT),
+                    "-pubkey", "-noout",
+                ]).stdout
+                key_public = run([
+                    "openssl", "pkey", "-in", str(DASHBOARD_KEY), "-pubout",
+                ]).stdout
+                if cert_public != key_public:
+                    raise ValueError("certificate and private key do not match")
+            except Exception as exc:
+                warn(f"Replacing unusable dashboard certificate: {exc}")
+                reuse_existing = False
+
+        if not reuse_existing:
+            # A partial pair cannot be used safely; generate both into
+            # temporary files and replace only after OpenSSL succeeds.
+            cert_tmp.unlink(missing_ok=True)
+            key_tmp.unlink(missing_ok=True)
+            run(
+                openssl_certificate_command(
+                    cert_tmp, key_tmp, report.hardware.ip_address
+                ),
+                timeout=180,
+            )
+            os.chmod(cert_tmp, 0o644)
+            os.chmod(key_tmp, 0o600)
+            os.replace(cert_tmp, DASHBOARD_CERT)
+            os.replace(key_tmp, DASHBOARD_KEY)
+            step(f"Generated dashboard certificate for {report.hardware.ip_address}")
+        else:
+            os.chmod(DASHBOARD_CERT, 0o644)
+            os.chmod(DASHBOARD_KEY, 0o600)
+            step("Preserved existing dashboard certificate and private key")
+
+        fingerprint = run([
+            "openssl", "x509", "-in", str(DASHBOARD_CERT),
+            "-noout", "-fingerprint", "-sha256",
+        ]).stdout.strip()
+        DASHBOARD_FINGERPRINT.write_text(fingerprint + "\n")
+        os.chmod(DASHBOARD_FINGERPRINT, 0o644)
+
+        NGINX_SITE.parent.mkdir(parents=True, exist_ok=True)
+        NGINX_ENABLED.parent.mkdir(parents=True, exist_ok=True)
+        NGINX_SITE.write_text(nginx_site_config(DASHBOARD_CERT, DASHBOARD_KEY))
+        os.chmod(NGINX_SITE, 0o644)
+
+        default_site = NGINX_ENABLED.parent / "default"
+        if default_site.is_symlink():
+            default_site.unlink()
+        if NGINX_ENABLED.is_symlink() or NGINX_ENABLED.exists():
+            if NGINX_ENABLED.is_symlink() and NGINX_ENABLED.resolve() == NGINX_SITE:
+                pass
+            else:
+                NGINX_ENABLED.unlink()
+        if not NGINX_ENABLED.exists():
+            NGINX_ENABLED.symlink_to(NGINX_SITE)
+
+        run(["nginx", "-t"])
+        run(["systemctl", "enable", "nginx"])
+        run(["systemctl", "restart", "nginx"])
+        report.files_deployed.extend(
+            str(path) for path in (
+                DASHBOARD_CERT, DASHBOARD_KEY, DASHBOARD_FINGERPRINT, NGINX_SITE,
+            )
+        )
+        ok(f"HTTPS dashboard configured; verify {DASHBOARD_FINGERPRINT}")
+    except Exception as exc:
+        cert_tmp.unlink(missing_ok=True)
+        key_tmp.unlink(missing_ok=True)
+        message = f"Dashboard TLS configuration failed: {exc}"
+        err(message)
+        report.errors.append(message)
+
+# ─── Phase 8: Systemd units ───────────────────────────────────────────────────
 
 SYSTEMD_UNITS: dict[str, str] = {}
 
@@ -715,6 +923,53 @@ SYSTEMD_UNITS["specter-dashboard.service"] = textwrap.dedent("""\
     StandardOutput=journal
     StandardError=journal
     SyslogIdentifier=specter-dashboard
+
+    [Install]
+    WantedBy=multi-user.target
+""")
+
+SYSTEMD_UNITS["specter-ward.service"] = textwrap.dedent("""\
+    [Unit]
+    Description=SPECTER Ward Module (sustained bed care)
+    After=network.target specter-mqtt.service
+
+    [Service]
+    Type=simple
+    User=specter
+    WorkingDirectory=/opt/specter
+    ExecStart=/opt/specter/venv/bin/python /opt/specter/ward/specter_ward.py --mqtt-host 192.168.1.1 --persist /var/lib/specter/ward.json
+    Restart=always
+    RestartSec=5
+    StateDirectory=specter
+    StateDirectoryMode=0755
+    StandardOutput=journal
+    StandardError=journal
+    SyslogIdentifier=specter-ward
+
+    [Install]
+    WantedBy=multi-user.target
+""")
+
+SYSTEMD_UNITS["specter-mesh.service"] = textwrap.dedent("""\
+    [Unit]
+    Description=SPECTER Mesh Relay (LoRa/Meshtastic internal comms + alarm notification)
+    After=network.target specter-mqtt.service
+
+    [Service]
+    Type=simple
+    User=specter
+    Group=dialout
+    WorkingDirectory=/opt/specter
+    ExecStart=/opt/specter/venv/bin/python /opt/specter/mesh/specter_mesh_relay.py --mqtt-host 192.168.1.1
+    # If multiple USB-serial devices are attached, pin the radio by adding:
+    # --serial-port /dev/ttyUSB0
+    Restart=always
+    RestartSec=5
+    StateDirectory=specter
+    StateDirectoryMode=0755
+    StandardOutput=journal
+    StandardError=journal
+    SyslogIdentifier=specter-mesh
 
     [Install]
     WantedBy=multi-user.target
@@ -808,9 +1063,35 @@ SYSTEMD_UNITS["specter-thermal.service"] = textwrap.dedent("""\
     WantedBy=multi-user.target
 """)
 
+SYSTEMD_UNITS["specter-ecg-ai.service"] = textwrap.dedent("""\
+    [Unit]
+    Description=SPECTER Offline 12-Lead ECG Research Analysis
+    After=network.target specter-mqtt.service
+    RequiresMountsFor=/mnt/specter
+
+    [Service]
+    Type=simple
+    User=specter
+    WorkingDirectory=/opt/specter
+    ExecStart=/opt/specter/venv/bin/python /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json service
+    Restart=on-failure
+    RestartSec=10
+    NoNewPrivileges=true
+    PrivateTmp=true
+    ProtectSystem=strict
+    ProtectHome=true
+    ReadWritePaths=/mnt/specter/live/ecg /mnt/specter/archive/ecg /mnt/specter/archive/ecg-rejected
+    StandardOutput=journal
+    StandardError=journal
+    SyslogIdentifier=specter-ecg-ai
+
+    [Install]
+    WantedBy=multi-user.target
+""")
+
 
 def install_systemd_units(report: InstallReport) -> None:
-    banner("PHASE 7 — SYSTEMD UNITS")
+    banner("PHASE 8 — SYSTEMD UNITS")
     systemd_dir = Path("/etc/systemd/system")
 
     for unit_name, content in SYSTEMD_UNITS.items():
@@ -823,6 +1104,12 @@ def install_systemd_units(report: InstallReport) -> None:
     ok("systemd daemon reloaded")
 
     for unit_name in SYSTEMD_UNITS:
+        if unit_name == "specter-ecg-ai.service" and not ECG_AI_ENABLED:
+            warn(
+                "Installed specter-ecg-ai.service but left it disabled. "
+                "Provision one analysis node, then reinstall with SPECTER_ENABLE_ECG_AI=1."
+            )
+            continue
         try:
             run(["systemctl", "enable", unit_name])
             run(["systemctl", "restart", unit_name])
@@ -832,10 +1119,10 @@ def install_systemd_units(report: InstallReport) -> None:
             warn(f"Failed to start {unit_name}: {e}")
             report.services_failed.append(unit_name)
 
-# ─── Phase 8: USB rules & kernel mods ────────────────────────────────────────
+# ─── Phase 9: USB rules & kernel mods ────────────────────────────────────────
 
 def configure_udev(report: InstallReport) -> None:
-    banner("PHASE 8 — UDEV RULES & KERNEL CONFIG")
+    banner("PHASE 9 — UDEV RULES & KERNEL CONFIG")
 
     udev_rules = textwrap.dedent("""\
         # SPECTER SDR udev rules
@@ -879,10 +1166,10 @@ def configure_udev(report: InstallReport) -> None:
     report.files_deployed.append(str(udev_path))
     report.files_deployed.append(str(bl_path))
 
-# ─── Phase 9: gpsd config ─────────────────────────────────────────────────────
+# ─── Phase 10: gpsd config ────────────────────────────────────────────────────
 
 def configure_gpsd(report: InstallReport) -> None:
-    banner("PHASE 9 — GPSD CONFIGURATION")
+    banner("PHASE 10 — GPSD CONFIGURATION")
     gpsd_default = Path("/etc/default/gpsd")
     gpsd_conf = textwrap.dedent("""\
         # SPECTER gpsd configuration
@@ -903,10 +1190,10 @@ def configure_gpsd(report: InstallReport) -> None:
         warn(f"gpsd start failed (GPS device may not be present yet): {e}")
         report.warnings.append("gpsd not started — connect GPS hardware and run: systemctl start gpsd")
 
-# ─── Phase 10: Cron / rsync archive ──────────────────────────────────────────
+# ─── Phase 11: Cron / rsync archive ──────────────────────────────────────────
 
 def configure_cron(report: InstallReport) -> None:
-    banner("PHASE 10 — MAINTENANCE CRON JOBS")
+    banner("PHASE 11 — MAINTENANCE CRON JOBS")
     cron_content = textwrap.dedent("""\
         # SPECTER maintenance cron jobs
         # Rotate recordings older than 7 days to archive
@@ -927,7 +1214,7 @@ def configure_cron(report: InstallReport) -> None:
     report.files_deployed.append(str(cron_path))
     ok("Cron jobs installed")
 
-# ─── Phase 11: Post-install report ───────────────────────────────────────────
+# ─── Phase 12: Post-install report ───────────────────────────────────────────
 
 def write_report(report: InstallReport) -> None:
     banner("SPECTER INSTALL REPORT")
@@ -984,7 +1271,8 @@ def write_report(report: InstallReport) -> None:
     lines += [
         "",
         "── NEXT STEPS ───────────────────────────────────────",
-        "  Dashboard:    http://" + hw.ip_address + ":5000",
+        "  Dashboard:    https://" + hw.ip_address,
+        "  TLS SHA-256:  " + str(DASHBOARD_FINGERPRINT),
         "  Logs:         journalctl -u specter-* -f",
         "  Trigger RX:   touch /run/specter/sdr_trigger",
         "  Status:       systemctl status specter-*",
@@ -1014,6 +1302,25 @@ def main() -> int:
         print("[ERROR] Must be run as root:  sudo python3 install_specter.py")
         return 1
 
+    missing_secrets = []
+    if not MQTT_USERNAME:
+        missing_secrets.append("SPECTER_MQTT_USER (must not be empty)")
+    if len(MQTT_PASSWORD) < 12 or MQTT_PASSWORD == MQTT_DEFAULT_PASSWORD:
+        missing_secrets.append(
+            "SPECTER_MQTT_PASSWORD (must be non-default and at least 12 characters)"
+        )
+    if not DASHBOARD_USERNAME:
+        missing_secrets.append("SPECTER_DASHBOARD_USER (must not be empty)")
+    if len(DASHBOARD_PASSWORD) < 12 or DASHBOARD_PASSWORD == MQTT_DEFAULT_PASSWORD:
+        missing_secrets.append(
+            "SPECTER_DASHBOARD_PASSWORD (must be non-default and at least 12 characters)"
+        )
+    if missing_secrets:
+        print("[ERROR] Refusing an insecure installation. Set:")
+        for item in missing_secrets:
+            print(f"  - {item}")
+        return 1
+
     start = time.time()
     report = InstallReport()
 
@@ -1031,6 +1338,7 @@ def main() -> int:
     create_venv(report)
     deploy_scripts(report)
     write_configs(report)
+    configure_dashboard_tls(report)
     install_systemd_units(report)
     configure_udev(report)
     configure_gpsd(report)

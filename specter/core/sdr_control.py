@@ -23,13 +23,13 @@ import time
 from pathlib import Path
 
 CONFIG_PATH = Path("/etc/specter/specter.json")
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "sdr_control"
 # account: it can only read shtf/sdr/cmd and write its own status/alarm
-# topics. Fallback values below are used only when specter.json has no
-# mqtt.services.sdr_control entry (e.g. running outside a real install).
+# topics. Runtime connections require the dedicated credential and reject
+# the installer's placeholder password.
 MQTT_SERVICE_KEY      = "sdr_control"
 MQTT_DEFAULT_USERNAME = "specter-sdr-control"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
@@ -50,6 +50,23 @@ def load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text())
     except Exception:
         return {}
+
+
+def _service_credentials(mqtt_cfg: dict) -> tuple[str, str]:
+    service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
+
+
+def _mqtt_client(mqtt_module, client_id: str):
+    try:
+        return mqtt_module.Client(
+            mqtt_module.CallbackAPIVersion.VERSION2, client_id=client_id
+        )
+    except (AttributeError, TypeError):
+        return mqtt_module.Client(client_id=client_id)
 
 
 def probe_sdr_devices() -> dict:
@@ -97,11 +114,9 @@ class SDRControlService:
     def __init__(self):
         cfg = load_config()
         mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
         self.broker   = mqtt_cfg.get("broker", "192.168.1.1")
         self.port     = mqtt_cfg.get("port", 1883)
-        self.username = service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME))
-        self.password = service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD))
+        self.username, self.password = _service_credentials(mqtt_cfg)
 
         self._devices   = {}
         self._procs:    dict[str, subprocess.Popen] = {}
@@ -110,18 +125,21 @@ class SDRControlService:
         self._lock      = threading.Lock()
         self._start_time = time.time()
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             log.info("MQTT connected")
             client.subscribe(TOPIC_SDR_CMD)
         else:
-            log.error("MQTT connect failed rc=%d", rc)
+            log.error("MQTT connect failed: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
         """Handle SDR commands from MQTT."""
         try:
             cmd = json.loads(msg.payload.decode())
         except Exception:
+            return
+        if not isinstance(cmd, dict):
+            log.warning("Ignoring malformed SDR command: expected JSON object")
             return
 
         action = cmd.get("action", "")
@@ -161,7 +179,7 @@ class SDRControlService:
     def run(self):
         import paho.mqtt.client as mqtt
 
-        client = mqtt.Client(client_id="specter_sdr_control")
+        client = _mqtt_client(mqtt, "specter_sdr_control")
         client.username_pw_set(self.username, self.password)
         client.on_connect = self._on_connect
         client.on_message = self._on_message

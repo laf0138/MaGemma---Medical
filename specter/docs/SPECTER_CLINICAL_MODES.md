@@ -25,6 +25,8 @@
 
 ## PART 1 — WARD MODE (5-day bed care)
 
+**STATUS: Implemented (August 2026).** The data model in 1.2, the alarm thresholds in 1.4, and the AI query pattern in 1.5 are built as specified in `specter/ward/specter_ward.py` and live at `/ward` (see `docs/MANUAL.md` Parts 5.2/7.1/4.5). The screen in 1.3 below is a simplified real implementation, not a pixel-for-pixel match of this mockup - no charted flowsheet yet (recent vitals render as a table instead), and multiple episodes are tabs across the top rather than a single fixed layout. Sections 1.1/1.2/1.4/1.5 remain the source of truth for *why* each number/threshold exists; treat this file as design intent that the real implementation should keep matching, not as documentation of current UI pixels.
+
 ### 1.1 What actually goes wrong in this window
 
 Someone in bed for five days is not at risk from the illness alone. The predictable secondary harms, roughly in order of likelihood:
@@ -355,3 +357,5 @@ Order matters: Stop the Bleed now, WFR next, TCCC after, IV/IO alongside whichev
 ---
 
 **Build order:** Ward mode first — it is the highest-probability scenario and the least designed. Resus second. The chronic mode already largely exists.
+
+**Status (August 2026):** Ward mode built - see Part 1's status note. Resus stayed at real-logic-but-local-demo (`docs/MANUAL.md` Part 7.2) rather than being wired to live trauma MQTT state; that's still the next piece if this build order is followed through.

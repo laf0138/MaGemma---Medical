@@ -71,6 +71,7 @@ def _reset_fakes(monkeypatch):
     FakeHeartRate.instances.clear()
     monkeypatch.setattr(hub_mod, "PolarMeasurementData", FakePMD)
     monkeypatch.setattr(hub_mod, "HeartRate", FakeHeartRate)
+    monkeypatch.setattr(hub_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     yield
 
 
@@ -138,6 +139,28 @@ class TestEcgWaveformCollection:
         assert FakeHeartRate.instances[-1].notify_started is True
         assert FakeHeartRate.instances[-1].notify_stopped is True
 
+    def test_stream_cleanup_failures_are_contained(self, hub, monkeypatch, caplog):
+        class StopFailPMD(FakePMD):
+            async def stop_streaming(self, measurement):
+                raise RuntimeError("ECG stop failed")
+
+        class StopFailHeartRate(FakeHeartRate):
+            async def stop_notify(self):
+                raise RuntimeError("HR stop failed")
+
+        monkeypatch.setattr(hub_mod, "PolarMeasurementData", StopFailPMD)
+        monkeypatch.setattr(hub_mod, "HeartRate", StopFailHeartRate)
+
+        result = asyncio.run(
+            hub._collect_polar_h10_stream(
+                object(), {"name": "Polar H10", "type": "polar_h10"}
+            )
+        )
+
+        assert result == {}
+        assert "ECG stop failed" in caplog.text
+        assert "HR stop failed" in caplog.text
+
 
 class TestHeartRateCollection:
     def test_heart_rate_constructed_with_unpack_false(self, hub):
@@ -198,8 +221,8 @@ class TestEcgAnalysisWiring:
 
         result = asyncio.run(run())
         assert result["ecg_waveform_uv"] == [1, 2, 3]
-        assert "ecg_qrs_duration_ms" not in result
-        assert "ecg_advisory_flags" not in result
+        assert "ecg_q_s_peak_interval_ms" not in result
+        assert "ecg_analysis_status" not in result
 
     def test_realistic_waveform_populates_analysis_fields(self, hub):
         sr = hub_mod.POLAR_H10_ECG_SAMPLE_RATE_HZ
@@ -217,12 +240,42 @@ class TestEcgAnalysisWiring:
 
         result = asyncio.run(run())
         assert result["ecg_waveform_uv"] == samples
-        assert "ecg_qrs_duration_ms" in result
-        assert "ecg_r_wave_amplitude_uv" in result
-        assert "ecg_t_wave_amplitude_uv" in result
-        assert "ecg_t_r_ratio" in result
-        # A normal synthetic beat should not raise an advisory flag.
+        assert "ecg_q_s_peak_interval_ms" in result
+        assert "ecg_qrs_duration_ms" not in result
+        assert "ecg_r_wave_abs_amplitude_uv" in result
+        assert "ecg_t_wave_abs_amplitude_uv" in result
+        assert "ecg_t_r_abs_ratio" in result
+        assert result["ecg_morphology_beats_analyzed"] >= 3
+        assert result["ecg_analysis_status"] == "experimental_not_clinically_validated"
+        # Unvalidated morphology must not become a diagnostic-style alert.
         assert "ecg_advisory_flags" not in result
+
+    def test_analysis_warnings_are_preserved(self, hub, monkeypatch):
+        monkeypatch.setattr(
+            hub_mod,
+            "analyze_ecg_waveform",
+            lambda *_args, **_kwargs: {
+                "analysis_status": "experimental_not_clinically_validated",
+                "warnings": ["R-wave amplitude was zero; ratio withheld"],
+            },
+        )
+
+        async def run():
+            task = asyncio.ensure_future(
+                hub._collect_polar_h10_stream(
+                    object(), {"name": "Polar H10", "type": "polar_h10"}
+                )
+            )
+            await asyncio.sleep(0)
+            await FakePMD.instances[-1].ecg_queue.put(
+                ('ECG', 1_000_000, [0] * 130)
+            )
+            return await task
+
+        result = asyncio.run(run())
+        assert result["ecg_analysis_warnings"] == [
+            "R-wave amplitude was zero; ratio withheld"
+        ]
 
 
 class TestCollectFromDeviceDispatch:

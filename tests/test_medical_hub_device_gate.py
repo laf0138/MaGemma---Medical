@@ -50,6 +50,7 @@ def _reset_recording_client():
 
 @pytest.fixture
 def hub(monkeypatch):
+    monkeypatch.setattr(hub_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     h = hub_mod.MedicalHubBleCollector()
     h.discovered_devices = {
         "AA:BB:CC:DD:EE:FF": {

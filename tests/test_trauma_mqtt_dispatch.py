@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+import trauma.specter_trauma as trauma_mod
 from trauma.specter_trauma import TraumaService
 
 
@@ -34,7 +35,8 @@ def command_msg(cmd: str, **payload) -> FakeMsg:
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
+    monkeypatch.setattr(trauma_mod, "_mqtt_credentials", lambda: ("test-user", "test-password"))
     svc = TraumaService("mqtt-host", 1883, str(tmp_path / "scene.json"))
     svc.mqtt = FakeMQTT()
     return svc

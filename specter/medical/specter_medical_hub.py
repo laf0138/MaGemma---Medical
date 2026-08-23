@@ -16,7 +16,7 @@ MQTT topics: shtf/medical/vitals/*
 
 Author: SPECTER Build Team
 Date: August 2026
-Version: 1.1.0
+Version: 1.2.0
 """
 
 import os
@@ -36,7 +36,7 @@ import paho.mqtt.client as mqtt
 def _mqtt_client(client_id: str = ""):
     """Construct an MQTT client that works on paho-mqtt 1.x and 2.x."""
     try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except (AttributeError, TypeError):
         # paho-mqtt 1.x has no CallbackAPIVersion - fall back to the
         # old-style constructor (deprecated but functional on 2.x too),
@@ -49,27 +49,24 @@ def _mqtt_client(client_id: str = ""):
 # See docs/MANUAL.md Part 3.3 - the broker requires auth, with a dedicated
 # least-privilege ACL account per service. This is the "medical_hub"
 # account: it can only read shtf/medical/hub/command/# and write vitals.
-# Fallback values below are used only when specter.json has no
-# mqtt.services.medical_hub entry (e.g. running outside a real install).
+# Runtime connections require the dedicated credential and reject the
+# installer's placeholder password.
 MQTT_SERVICE_KEY      = "medical_hub"
 MQTT_DEFAULT_USERNAME = "specter-medical-hub"
 MQTT_DEFAULT_PASSWORD = "specter-change-me"
 
 
 def _mqtt_credentials() -> tuple:
-    """Read this service's MQTT username/password from
-    /etc/specter/specter.json (written by the installer) if available,
-    else fall back to the documented default."""
+    """Return the dedicated service credential, failing closed if absent."""
     try:
         cfg = json.loads(Path("/etc/specter/specter.json").read_text())
-        mqtt_cfg = cfg.get("mqtt", {})
-        service_cfg = mqtt_cfg.get("services", {}).get(MQTT_SERVICE_KEY, {})
-        return (
-            service_cfg.get("username", mqtt_cfg.get("username", MQTT_DEFAULT_USERNAME)),
-            service_cfg.get("password", mqtt_cfg.get("password", MQTT_DEFAULT_PASSWORD)),
-        )
-    except Exception:
-        return MQTT_DEFAULT_USERNAME, MQTT_DEFAULT_PASSWORD
+    except Exception as exc:
+        raise RuntimeError("MQTT configuration is unreadable") from exc
+    service_cfg = cfg.get("mqtt", {}).get("services", {}).get(MQTT_SERVICE_KEY, {})
+    username, password = service_cfg.get("username"), service_cfg.get("password")
+    if not username or not password or password == MQTT_DEFAULT_PASSWORD:
+        raise RuntimeError(f"dedicated MQTT credentials missing for {MQTT_SERVICE_KEY}")
+    return username, password
 # ---------------------------------------------------------------------------
 import asyncio
 from bleak import BleakClient, BleakScanner
@@ -501,21 +498,27 @@ class MedicalHubBleCollector:
         self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
         self.mqtt_client.on_message = self._on_mqtt_message
     
-    def _on_mqtt_connect(self, client, userdata, flags, rc):
+    def _on_mqtt_connect(self, client, userdata, flags, reason_code, properties=None):
         """MQTT connection callback"""
-        if rc == 0:
+        if reason_code == 0:
             self.mqtt_connected = True
             logger.info(f"MQTT connected to {self.mqtt_host}:{self.mqtt_port}")
             self.mqtt_client.subscribe("shtf/medical/hub/command/#")
         else:
-            logger.error(f"MQTT connection failed with code {rc}")
+            logger.error("MQTT connection failed: %s", reason_code)
             self.mqtt_connected = False
     
-    def _on_mqtt_disconnect(self, client, userdata, rc):
+    def _on_mqtt_disconnect(
+        self, client, userdata, disconnect_flags_or_reason_code,
+        reason_code=None, properties=None,
+    ):
         """MQTT disconnection callback"""
+        reason_code = (
+            disconnect_flags_or_reason_code if reason_code is None else reason_code
+        )
         self.mqtt_connected = False
-        if rc != 0:
-            logger.warning(f"MQTT disconnected unexpectedly with code {rc}")
+        if reason_code != 0:
+            logger.warning("MQTT disconnected unexpectedly: %s", reason_code)
     
     def _on_mqtt_message(self, client, userdata, msg):
         """Handle incoming MQTT commands"""
@@ -551,20 +554,40 @@ class MedicalHubBleCollector:
             devices = await scanner.discover(timeout=timeout, return_adv=True)
             
             self.discovered_devices = {}
-            for device, adv_data in devices.items():
-                device_name = device.name or device.address
+            # Bleak with return_adv=True returns
+            # {address: (BLEDevice, AdvertisementData)}.  The previous loop
+            # treated each address-string key as the BLEDevice, so every real
+            # scan failed at ``device.name`` and was swallowed by the broad
+            # exception below.  Accept the documented shape while retaining a
+            # list fallback for older/test scanner implementations.
+            entries = devices.values() if isinstance(devices, dict) else devices
+            for entry in entries:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    device, adv_data = entry
+                else:
+                    device, adv_data = entry, None
+                device_name = (
+                    getattr(device, 'name', None)
+                    or getattr(adv_data, 'local_name', None)
+                    or getattr(device, 'address', 'unknown')
+                )
+                device_address = getattr(device, 'address', device_name)
+                rssi = getattr(adv_data, 'rssi', getattr(device, 'rssi', None))
                 
                 # Check if device matches any medical device patterns
                 for dev_type, config in BluetoothDeviceConfig.DEVICES.items():
                     if config['name_pattern'].lower() in device_name.lower():
-                        self.discovered_devices[device.address] = {
+                        self.discovered_devices[device_address] = {
                             'name': device_name,
-                            'address': device.address,
+                            'address': device_address,
                             'type': dev_type,
-                            'rssi': device.rssi,
+                            'rssi': rssi,
                             'object': device
                         }
-                        logger.info(f"Found {dev_type}: {device_name} ({device.address}) RSSI: {device.rssi}")
+                        logger.info(
+                            f"Found {dev_type}: {device_name} "
+                            f"({device_address}) RSSI: {rssi}"
+                        )
             
             return self.discovered_devices
         
@@ -711,19 +734,25 @@ class MedicalHubBleCollector:
             if 'error' in analysis:
                 logger.info(f"Polar H10 ECG analysis skipped for {device_info['name']}: {analysis['error']}")
             else:
-                if 'qrs_duration_ms' in analysis:
-                    result['ecg_qrs_duration_ms'] = analysis['qrs_duration_ms']
-                if 'r_wave_amplitude_uv' in analysis:
-                    result['ecg_r_wave_amplitude_uv'] = analysis['r_wave_amplitude_uv']
-                if 't_wave_amplitude_uv' in analysis:
-                    result['ecg_t_wave_amplitude_uv'] = analysis['t_wave_amplitude_uv']
-                if 't_r_ratio' in analysis:
-                    result['ecg_t_r_ratio'] = analysis['t_r_ratio']
-                if analysis.get('flags'):
-                    result['ecg_advisory_flags'] = analysis['flags']
-                    logger.warning(
-                        f"Polar H10 ECG advisory flag(s) for {device_info['name']}: {analysis['flags']}"
-                    )
+                # These names are intentionally precise.  NeuroKit2 gives us
+                # Q/S peak locations, not a validated clinical QRS onset-to-
+                # offset duration.  Publishing that proxy as "QRS duration"
+                # made it too easy for a UI or model to apply an inapplicable
+                # diagnostic threshold.
+                analysis_fields = {
+                    'q_s_peak_interval_ms': 'ecg_q_s_peak_interval_ms',
+                    'r_wave_abs_amplitude_uv': 'ecg_r_wave_abs_amplitude_uv',
+                    't_wave_abs_amplitude_uv': 'ecg_t_wave_abs_amplitude_uv',
+                    't_r_abs_ratio': 'ecg_t_r_abs_ratio',
+                    'morphology_beats_analyzed': 'ecg_morphology_beats_analyzed',
+                    'amplitude_beats_analyzed': 'ecg_amplitude_beats_analyzed',
+                    'analysis_status': 'ecg_analysis_status',
+                }
+                for analysis_key, reading_key in analysis_fields.items():
+                    if analysis_key in analysis:
+                        result[reading_key] = analysis[analysis_key]
+                if analysis.get('warnings'):
+                    result['ecg_analysis_warnings'] = analysis['warnings']
 
         if latest_hr is not None:
             result['pulse'] = latest_hr
@@ -754,11 +783,14 @@ class MedicalHubBleCollector:
                         'ecg_rhythm': 'classification',
                         'ecg_waveform_uv': 'uV',
                         'rr_intervals_ms': 'ms',
-                        'ecg_qrs_duration_ms': 'ms',
-                        'ecg_r_wave_amplitude_uv': 'uV',
-                        'ecg_t_wave_amplitude_uv': 'uV',
-                        'ecg_t_r_ratio': 'ratio',
-                        'ecg_advisory_flags': 'text',
+                        'ecg_q_s_peak_interval_ms': 'ms',
+                        'ecg_r_wave_abs_amplitude_uv': 'uV',
+                        'ecg_t_wave_abs_amplitude_uv': 'uV',
+                        'ecg_t_r_abs_ratio': 'ratio',
+                        'ecg_morphology_beats_analyzed': 'beats',
+                        'ecg_amplitude_beats_analyzed': 'beats',
+                        'ecg_analysis_status': 'status',
+                        'ecg_analysis_warnings': 'text',
                     }
                     unit = unit_map.get(reading_type, 'unknown')
                     
@@ -866,7 +898,7 @@ def main():
     args = parser.parse_args()
     
     logger.info("=" * 60)
-    logger.info("SPECTER Medical Hub v1.0.0 starting")
+    logger.info("SPECTER Medical Hub v1.2.0 starting")
     logger.info(f"MQTT: {args.mqtt_host}:{args.mqtt_port}")
     logger.info(f"Scan timeout: {args.scan_timeout}s")
     logger.info(f"Collection interval: {args.cycle_interval}s")

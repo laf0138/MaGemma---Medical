@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -430,12 +431,69 @@ class TestSceneRegistryPersistence:
         r = SceneRegistry(persist_path=str(path))
         assert r.casualties == {}
 
+    @pytest.mark.parametrize("payload", [
+        "[]",
+        '{"format": 2, "casualties": {"C-1": null}}',
+        '{"format": 2, "casualties": {}, "counter": "NaN"}',
+    ])
+    def test_structurally_corrupt_json_never_crashes_startup(self, tmp_path, payload):
+        path = tmp_path / "scene.json"
+        path.write_text(payload)
+        registry = SceneRegistry(persist_path=str(path))
+        assert registry.casualties == {}
+        assert registry._counter == 0
+
+    def test_counter_is_never_lower_than_restored_ids(self, tmp_path):
+        path = tmp_path / "scene.json"
+        original = SceneRegistry(persist_path=str(path))
+        original.add_casualty()
+        original.add_casualty()
+        raw = json.loads(path.read_text())
+        raw["counter"] = 0
+        path.write_text(json.dumps(raw))
+        restored = SceneRegistry(persist_path=str(path))
+        assert restored.add_casualty().casualty_id == "C-3"
+
     def test_persist_writes_atomically_no_leftover_tmp_file(self, tmp_path):
         path = tmp_path / "scene.json"
         r = SceneRegistry(persist_path=str(path))
         r.add_casualty()
         assert path.exists()
         assert not (tmp_path / "scene.json.tmp").exists()
+
+    # json.loads() can return any JSON value, not just an object - these
+    # three each independently crashed _restore() with an uncaught
+    # AttributeError/ValueError before that method validated the shape of
+    # what it read, contradicting its own documented "starts empty rather
+    # than crashing" behavior. Found by an external review; reproduced,
+    # fixed, pinned here.
+
+    def test_top_level_json_array_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text("[]")
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_null_casualty_entry_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text('{"format": 2, "casualties": {"C-1": null}}')
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties == {}
+
+    def test_non_numeric_counter_does_not_crash_restore(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text('{"format": 2, "casualties": {}, "counter": "NaN"}')
+        r = SceneRegistry(persist_path=str(path))
+        assert r._counter == 0
+
+    def test_non_dict_intervention_entry_is_skipped_not_crashed(self, tmp_path):
+        path = tmp_path / "scene.json"
+        path.write_text(
+            '{"format": 2, "casualties": {"C-1": {"casualty_id": "C-1", '
+            '"found_utc": "2026-01-01T00:00:00+00:00", "interventions": [null, "garbage"]}}}'
+        )
+        r = SceneRegistry(persist_path=str(path))
+        assert r.casualties["C-1"].interventions == []
 
 
 # ---------------------------------------------------------------------------

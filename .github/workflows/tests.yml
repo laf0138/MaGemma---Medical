@@ -9,15 +9,37 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock.txt
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install --require-hashes -r requirements-dev.lock.txt
+          pip check
 
-      - name: Run tests
-        run: pytest -v
+      - name: Run tests with coverage
+        run: |
+          pytest -v --cov=specter --cov-report=term-missing --cov-report=xml --cov-fail-under=65
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          echo "## Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

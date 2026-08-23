@@ -1,6 +1,6 @@
 # SPECTER MONSTER — OPERATIONS MANUAL
 
-**Version 1.1.0 · August 2026**
+**Version 1.2.0 · August 2026**
 Field-deployable emergency communications and medical command center.
 
 ---
@@ -45,8 +45,9 @@ Two design commitments drive everything:
 | **Node 6** | CM5 8GB (X1500) | 192.168.1.6 | Voice — Pi-Star, MMDVM, DMR/YSF/D-STAR |
 | **Jetson** | Orin NX 16GB | 192.168.1.10 | Medical AI (MedGemma 4B), RAG, Ollama |
 | **Med Hub** | Pi Zero 2W | 192.168.1.20 | Bluetooth vitals aggregator |
+| **Mesh radio** | Meshtastic-firmware LoRa device (model unspecified — see 7.2) | USB-attached to Node 1 | Internal comms + alarm relay, 915MHz US ISM band |
 
-Total: 36 CPU cores, 237 TOPS, 76 GB RAM (all soldered — nothing upgradeable, order the right SKUs).
+Total: 36 CPU cores, 237 TOPS, 76 GB RAM (all soldered — nothing upgradeable, order the right SKUs). The mesh radio is a Node 1 add-on, not a seventh node — it has no compute of its own and talks to Node 1 over USB serial.
 
 **Why Node 1 and 2 are full Pi 5s and not CM5s:** the Hailo-10H AI HAT+ 2 requires the Pi 5's exposed PCIe interface. The X1500 carrier does not expose PCIe in a form the HAT can use. This is a hard compatibility constraint, not a preference.
 
@@ -85,17 +86,23 @@ specter/
 ├── trauma/
 │   ├── specter_trauma.py           Casualty registry, triage, MARCH
 │   └── specter_trauma_monitor.py   Terminal triage board
+├── ward/
+│   └── specter_ward.py             Care episodes, fluid balance, NEWS2, care tasks
+├── mesh/
+│   └── specter_mesh_relay.py       LoRa/Meshtastic alarm relay + internal comms (Node 1 add-on)
 ├── dashboard/
 │   ├── dashboard_server.py         Flask + SocketIO backend
 │   ├── dashboard.html              Main RF/system dashboard
-│   └── resus.html                  RESUS triage + MARCH screens
+│   ├── resus.html                  RESUS triage + MARCH screens (demo, not live)
+│   ├── ward.html                   WARD sustained-care screen (live)
+│   └── vendor/                     Vendored Socket.IO/D3 (no CDN dependency)
 ├── scripts/
 │   ├── health_check.sh             Full system health report
 │   ├── disk_report.sh              Storage → MQTT
 │   ├── library_health.sh           Library service check
 │   └── specter-ask                 CLI query to the library AI
 ├── config/specter.json             Master config
-├── systemd/                        12 unit files
+├── systemd/                        14 unit files
 ├── deploy/
 │   ├── install_specter.py          Node installer (hardware probe + deploy)
 │   ├── install_specter_library.py  Library installer (Jetson/Node 5)
@@ -203,8 +210,8 @@ shared login — a leaked dashboard credential (broad read, many exposure
 points) can't be used to forge a trauma command, because the broker's ACL
 file only lets the `specter-dashboard` account read, never write. Pick one
 master password and use it on *every* node - there is no central secret
-store on an air-gapped mesh, so a mismatched password on any one node just
-means every service on it silently can't authenticate:
+store on an air-gapped network, so a mismatched password on any one node
+just means every service on it silently can't authenticate:
 
 ```bash
 export SPECTER_MQTT_USER=specter-operator    # broad-access role for manual/CLI use
@@ -216,15 +223,15 @@ If you skip this, every node falls back to the documented default
 bench, but change it before this leaves the building. Each service's own
 password is *derived* from this one master password (see
 `_derive_service_password()` in `deploy/install_specter.py`), so every
-node's independent install run agrees on all ten accounts without needing
-to distribute nine separate secrets by hand.
+node's independent install run agrees on all eleven accounts without
+needing to distribute eleven separate secrets by hand.
 
 ```bash
 sudo apt update && sudo apt install -y mosquitto mosquitto-clients python3-venv git
 sudo mkdir -p /opt/specter /etc/specter /var/log/specter /var/lib/specter
 sudo cp -r specter/* /opt/specter/
 sudo python3 -m venv /opt/specter/venv
-sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 flask==3.1.3 flask-socketio==5.6.1 eventlet==0.41.2 requests==2.33.1 numpy==2.4.6
+sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 flask==3.1.3 flask-socketio==5.6.1 requests==2.33.1 numpy==2.4.6
 # Pinned to the versions this repo's test suite is actually run against
 # (see requirements-dev.txt) - an unpinned install months from now can
 # pull a materially different, untested version onto a field kit.
@@ -233,9 +240,9 @@ sudo /opt/specter/venv/bin/pip install paho-mqtt==2.1.0 flask==3.1.3 flask-socke
 sudo useradd -r -s /bin/false -G audio,dialout,plugdev specter 2>/dev/null || true
 sudo chown -R specter:specter /opt/specter /var/log/specter /var/lib/specter
 
-# Broker config, password file (10 accounts: 1 operator + 9 services), and
+# Broker config, password file (12 accounts: 1 operator + 11 services), and
 # the matching ACL file are all generated by the installer - hand-deriving
-# nine per-service passwords and an ACL file in bash isn't practical to
+# eleven per-service passwords and an ACL file in bash isn't practical to
 # keep in sync with deploy/install_specter.py's MQTT_SERVICES table, so
 # this step is not shown as raw bash the way the others are:
 sudo python3 /opt/specter/deploy/install_specter.py
@@ -243,7 +250,7 @@ sudo python3 /opt/specter/deploy/install_specter.py
 
 This single installer run does everything the older manual bash sequence
 did (broker config, service user, specter.json) *plus* generates
-`/etc/mosquitto/specter_passwd` (all 10 accounts), `/etc/mosquitto/specter_acl`
+`/etc/mosquitto/specter_passwd` (all 12 accounts), `/etc/mosquitto/specter_acl`
 (per-account topic rules), and `specter.json`'s `mqtt.services` block. See
 Part 3.4 for what else it does.
 
@@ -254,17 +261,26 @@ sudo cp /opt/specter/systemd/specter-mqtt.service \
         /opt/specter/systemd/specter-dashboard.service \
         /opt/specter/systemd/specter-thermal.service \
         /opt/specter/systemd/specter-trauma.service \
+        /opt/specter/systemd/specter-ward.service \
+        /opt/specter/systemd/specter-mesh.service \
         /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now specter-mqtt specter-coordinator specter-dashboard specter-thermal specter-trauma
+sudo systemctl enable --now specter-mqtt specter-coordinator specter-dashboard specter-thermal specter-trauma specter-ward specter-mesh
 ```
+
+**`specter-mesh.service` needs a Meshtastic-firmware LoRa radio physically
+attached over USB before it will do anything useful** — see Part 7.2. If
+none is attached, the service starts, logs that no hardware was found, and
+retries every 30s; it does not block or delay any other service.
 
 Verify:
 ```bash
 export MQTT_USER="${SPECTER_MQTT_USER:-specter-operator}"
 export MQTT_PASSWORD="${SPECTER_MQTT_PASSWORD:-specter-change-me}"
 mosquitto_sub -h 127.0.0.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v    # should show heartbeats within 10s
-curl -s localhost:5000 | head -5              # dashboard responding
+curl --cacert /etc/specter/tls/dashboard.crt https://192.168.1.1/api/status
+# Loopback-only backend diagnostic on Node 1:
+curl -s http://127.0.0.1:5000/api/status
 ```
 
 ## 3.4 Nodes 2–6 — automated
@@ -450,6 +466,7 @@ Everything in SPECTER is this table. If you understand it, you can extend the sy
 | `shtf/medical/vitals/<pid>/<type>` | pub | Single reading (dashboard cards) |
 | `shtf/medical/query/<pid>` | sub | `{"query": "...", "request_id": "..."}` |
 | `shtf/medical/diagnosis/<pid>` | pub | AI output + `vitals_used` + sources (retained) |
+| `shtf/medical/derived/<pid>` | pub | MAP, pulse pressure, shock index, NEWS2, qSOFA, fever burden, delta-from-baseline (retained) — see `medical/clinical_scores.py`; NEWS2/qSOFA always `partial` here, no RR/consciousness sensor |
 | `shtf/medical/profile/<pid>` | sub | Update standing patient profile |
 | `shtf/medical/ai/status` | pub | `online` / `thinking` / `offline` |
 
@@ -470,6 +487,35 @@ Reading types: `bp_systolic`, `bp_diastolic`, `pulse`, `spo2`, `temperature_c`, 
 | `shtf/trauma/command/convert_tourniquet` | sub | `{"casualty_id":"C-1","tq_id":"C-1-TQ1"}` |
 | `shtf/trauma/command/vitals` | sub | `{"casualty_id":"C-1","vitals":{...}}` |
 | `shtf/trauma/command/assessed` | sub | `{"casualty_id":"C-1"}` — clears staleness |
+
+## 4.5 Ward
+
+| Topic | Dir | Payload |
+|---|---|---|
+| `shtf/ward/episode` | pub | All open episodes (retained) — fluid balance, care tasks, skin/nutrition/mobility, vitals, NEWS2, alerts |
+| `shtf/ward/episode/<id>` | pub | Single episode (retained) |
+| `shtf/ward/alert` | pub | Active alerts across all open episodes |
+| `shtf/ward/command/open_episode` | sub | `{"patient_id":"p1","presenting_problem":"pneumonia"}` |
+| `shtf/ward/command/close_episode` | sub | `{"episode_id":"W-1"}` |
+| `shtf/ward/command/intake` | sub | `{"episode_id":"W-1","route":"oral","volume_ml":250,"description":"water"}` |
+| `shtf/ward/command/output` | sub | `{"episode_id":"W-1","route":"urine","volume_ml":300}` — `route` also takes `emesis`\|`stool`\|`drain`\|`blood` |
+| `shtf/ward/command/add_care_task` | sub | `{"episode_id":"W-1","task_type":"medication","interval_minutes":360,"label":"prednisone"}` — `interval_minutes` required for any type beyond `reposition`/`skin_check` (seeded automatically), see `specter_ward.py`'s `DEFAULT_TASK_INTERVAL_MINUTES` docstring for why |
+| `shtf/ward/command/complete_task` | sub | `{"episode_id":"W-1","task_id":"W-1-T1"}` |
+| `shtf/ward/command/skin_check` | sub | `{"episode_id":"W-1","sites":{"sacrum":"intact","heels_l":"blanching_erythema"}}` |
+| `shtf/ward/command/nutrition` | sub | `{"episode_id":"W-1","description":"lunch","percent_consumed":60}` |
+| `shtf/ward/command/mobility` | sub | `{"episode_id":"W-1","level":"sat_edge","duration_minutes":10}` |
+| `shtf/ward/command/vitals` | sub | `{"episode_id":"W-1","values":{"rr":18,"spo2":97,"bp_systolic":120,"pulse":75,"avpu":"A","temperature_c":37.0}}` — NEWS2 computed server-side, missing parameters never scored as normal |
+
+## 4.6 Mesh relay (LoRa/Meshtastic)
+
+| Topic | Dir | Payload |
+|---|---|---|
+| `shtf/mesh/status` | pub | `{"state": ..., "timestamp_utc": ...}` (retained) — `connected`/`disconnected`/`not_found`/`ambiguous`/`connect_failed`/`offline` |
+| `shtf/mesh/sent` | pub | Log of what was actually transmitted onto the mesh: `{"source","kind","text","timestamp_utc"}` |
+| `shtf/mesh/inbound` | pub | Text received from another mesh node: `{"from","text","timestamp_utc"}` |
+| `shtf/mesh/command/send` | sub | `{"text":"...", "priority":"alert"\|"text"}` — operator-composed outbound message; `priority:"alert"` uses Meshtastic's higher-priority `sendAlert()` API |
+
+This service **subscribes** to `shtf/trauma/alert`, `shtf/ward/alert`, and `shtf/system/alarm` (not shown again here - see 4.3/4.4/4.5) and relays new or changed alarms onto the LoRa mesh automatically. See Part 7.2 for the rate-limiting/dedup rationale and hardware status.
 
 **Retained messages matter.** Scene state, diagnoses, and system state are published retained so a dashboard connecting late immediately gets current state rather than waiting for the next publish cycle.
 
@@ -493,16 +539,26 @@ SPECTER has **three clinical modes**. They are different problems with different
 2. Connect solar panel → MPPT → battery (or shore power)
 3. Power on — Node 1 first, wait 60s for broker, then remaining nodes
 4. `bash /opt/specter/scripts/health_check.sh`
-5. Open dashboard at `http://192.168.1.1:5000`
+5. Open dashboard at `https://192.168.1.1` and sign in with the
+   `SPECTER_DASHBOARD_USER` / `SPECTER_DASHBOARD_PASSWORD` values supplied to
+   the installer (see Part 3.3 and Part 7.4)
 6. Verify Kiwix at `http://192.168.1.5:8080` and medical AI status `online`
 
 Cold start to operational: about 4 minutes.
 
 ## 5.2 WARD mode — sustained care
 
-**This is the most likely scenario in the entire build.** Someone in bed for five days with pneumonia or a bad GI illness is vastly more probable than a gunshot wound.
+**This is the most likely scenario in the entire build.** Someone in bed for five days with pneumonia or a bad GI illness is vastly more probable than a gunshot wound. **Implemented** as of this build — see Part 7.1.
 
 What actually harms them is not the illness — it is dehydration, pressure injury, and deterioration nobody caught.
+
+Open `https://192.168.1.1/ward` (operator login required, same credential as the main dashboard - Part 7.4). Unlike RESUS, this screen is genuinely live: every action (opening an episode, logging intake/output, completing a care task, recording vitals) publishes a real MQTT command to `specter-ward.service`, which persists it and republishes the updated episode back to every connected screen. Multiple episodes (1-2 known patients) are supported via the tab strip in the header.
+
+**Flow:**
+1. `+ New episode` — patient ID and presenting problem. Reposition (q2h) and skin-check (q4h) care tasks are seeded automatically; add anything else (medication, wound checks, etc.) with its own interval — there's no invented universal default for those, since real intervals are prescription/care-plan specific.
+2. Log every intake and output by measurement as it happens, not at end of shift.
+3. Record vitals at the interval the header shows — it escalates from 4h to 1h automatically once NEWS2 reaches 5, per the routine below.
+4. Work the Care Due panel like RESUS's MARCH checklist — it's a countdown, not a list to revisit later.
 
 **The numbers that matter:**
 
@@ -521,7 +577,8 @@ What actually harms them is not the illness — it is dehydration, pressure inju
 
 ## 5.3 RESUS mode — trauma
 
-Open `http://192.168.1.1:5000/resus` or the `resus.html` file directly.
+Open `https://192.168.1.1/resus`. Do not open `resus.html` directly: the
+served route provides operator authentication and the application context.
 
 **Trauma care is algorithmic, not diagnostic.** You do not need a differential for a gunshot wound; you need MARCH executed fast and in order. The AI is available but never on the critical path — a 3–5 second inference is an eternity when someone is bleeding.
 
@@ -587,6 +644,12 @@ systemctl status 'specter-*'                        # what is running
 journalctl -u specter-<name> -n 50 --no-pager       # recent errors
 mosquitto_sub -h 192.168.1.1 -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t 'shtf/#' -v         # is traffic flowing
 ```
+
+**Dashboard prompts for a login and rejects it.** Every dashboard/RESUS/WARD
+route except `/api/status` requires the operator credential (Part 7.4). The
+configuration stores only a PBKDF2 password hash, so the password cannot be
+recovered from `specter.json`. Set `SPECTER_DASHBOARD_USER` and
+`SPECTER_DASHBOARD_PASSWORD` and re-run the installer to reset it.
 
 ## 6.2 MQTT
 
@@ -712,6 +775,16 @@ journalctl -u specter-thermal -n 100
 
 **Solar not charging.** Check MPPT display for input voltage. The EcoFlow panel is 21.8V open-circuit; below ~14V the MPPT cannot buck to 12.8V. Shade on one cell string collapses output disproportionately.
 
+## 6.9 Mesh relay
+
+**`shtf/mesh/status` stays at `not_found` / journal says "No Meshtastic LoRa hardware detected."** Expected if no radio is plugged into Node 1 - the service idles and retries every 30s rather than crashing. Check `lsusb` and that the radio is actually in Meshtastic firmware (not another mode); check `/dev/ttyUSB*`/`/dev/ttyACM*` exists.
+
+**Status is `ambiguous`.** More than one USB-serial device is attached to Node 1 (a GPS puck, another radio) and auto-detection can't tell them apart - this is by design (see Part 7.2 for why it doesn't just guess). Add `--serial-port /dev/ttyUSBx` to `specter-mesh.service`'s `ExecStart` line (the unit file has a commented-out example) after identifying the right device with `ls -l /dev/serial/by-id/`.
+
+**Alerts aren't reaching the mesh.** Confirm `shtf/mesh/status` is `connected`, then check `journalctl -u specter-mesh` for "Mesh TX" lines - if an alert fired on the dashboard but nothing shows there, check `_last_sent` suppression logic isn't the cause (an unchanged alert set only re-announces every 15 minutes by design, see Part 7.2) versus a real delivery failure.
+
+**Channel/encryption setup.** This service does not manage the LoRa channel or its pre-shared key - provision that once on the radio itself with Meshtastic's own CLI (`meshtastic --ch-set psk <key> --ch-index 0`) or app before deploying. `specter-mesh.service` just uses whatever channel the radio already has configured.
+
 ---
 
 # PART 7 — KNOWN GAPS
@@ -724,20 +797,31 @@ journalctl -u specter-thermal -n 100
 - ✅ RX ring buffer — pre-trigger capture with the wrap-detection bug fixed.
 - ✅ Installers — hardware probe, package install, service deployment.
 - ✅ MARCH paper card generation.
-- ✅ Dashboard server (`dashboard_server.py`) — MQTT-to-WebSocket relay, `/`, `/resus`, `/api/state`, `/api/status` routes, broker-connection status tracking. See Part 7.4 for the security/XSS/offline fixes this had needed.
+- ✅ Dashboard server (`dashboard_server.py`) — MQTT-to-WebSocket relay, `/`, `/resus`, `/ward`, `/api/state`, `/api/status` routes, broker-connection status tracking, operator login. See Part 7.4 for the security/XSS/offline fixes this had needed.
+- ✅ **Ward module (`ward/specter_ward.py`) and the live `/ward` screen** — the highest-probability scenario in the whole build (Part 5.2), previously fully specified with no code. `CareEpisodeRegistry` (fluid balance, scheduled care tasks, skin checks, nutrition, mobility, vitals) persists with the same atomic-write/restore pattern as the trauma module; NEWS2 is computed server-side (standard RCP NEWS2 Scale 1 - see the module docstring for why Scale 2 isn't implemented, and why a missing vitals parameter is never silently scored as 0/normal); alarms match every threshold in `SPECTER_CLINICAL_MODES.md` 1.4. Unlike RESUS, `ward.html` is genuinely live, not a local demo: every action round-trips through real MQTT (`shtf/ward/command/#` → `specter-ward.service` → persisted + republished → every connected screen), confirmed end-to-end with a real local broker and headless browser, not just unit tests. This needed one deliberate ACL change - see the write-back note in Part 7.2.
+- ✅ **Derived clinical metrics (MAP, pulse pressure, shock index, NEWS2, qSOFA, fever burden, Δ-from-baseline)** — previously documented in `SPECTER_MEDICAL_UI_BRIEF.md` Part 1.3 as design intent only, not computed anywhere. Now implemented: scoring functions live in the new `medical/clinical_scores.py`, shared between WARD's manual bedside NEWS2 and the automated-device path in `medical/specter_medical_ai.py`'s `VitalsCache.derived()`. Published retained to `shtf/medical/derived/<patient_id>` on every vitals update and surfaced in MedGemma's prompt. **NEWS2 and qSOFA are always partial on the automated-device path** — no BLE device in this build measures respiration rate or level of consciousness, so both scores are computed with those parameters explicitly listed as missing (never scored as 0/normal), and `qSOFA.positive` is `null`, not `false`, whenever an input is absent, so a partial score can never read as "ruled out." Fever burden and Δ-from-baseline are bounded by the AI engine's in-memory reading history (not persisted across restarts, and not yet a true 24h/30-day window) — see `SPECTER_MEDICAL_UI_BRIEF.md` 1.3 for the full accounting of what's real vs. still a gap.
 
 ## 7.2 Built, not yet tested against real hardware
 
-- ⚠️ **RESUS UI (`resus.html`)** — the triage board and MARCH screens (state-driven directive, step gating, obligation timers, append-only correction log) are real, tested logic, but run entirely against **locally-generated sample casualties in browser memory**, not the live trauma service. It does not consume `shtf/trauma/#`, so nothing an operator does on this screen reaches the trauma service, MQTT, or any other operator's screen, and refreshing the page discards all of it. A `⚠ DEMO MODE` banner now says this explicitly on the screen itself (August 2026 fix - see Part 7.4) rather than presenting as connected, which it previously did not. Wiring this to the real trauma service (consume `shtf/trauma/scene` for state, publish `shtf/trauma/command/#` for actions) is real, substantial work that has not been done.
+- ⚠️ **RESUS UI (`resus.html`)** — the triage board and MARCH screens (state-driven directive, step gating, obligation timers, append-only correction log) are real, tested logic, but run entirely against **locally-generated sample casualties in browser memory**, not the live trauma service. It does not consume `shtf/trauma/#`, so nothing an operator does on this screen reaches the trauma service, MQTT, or any other operator's screen, and refreshing the page discards all of it. A `⚠ DEMO MODE` banner now says this explicitly on the screen itself (August 2026 fix - see Part 7.4) rather than presenting as connected, which it previously did not. Wiring this to the real trauma service (consume `shtf/trauma/scene` for state, publish `shtf/trauma/command/#` for actions) is real, substantial work that has not been done - **WARD mode's `/ward` screen is what that work looks like once done** (Part 7.1), including the one ACL change it needed: the dashboard's MQTT credential is deliberately broad-READ/zero-WRITE across `shtf/#` (so a leaked credential can't forge a command), but WARD's care-task completion/intake logging genuinely needs a write-back path, so it now carries one narrow exception - `write shtf/ward/command/#` and nothing else (`deploy/install_specter.py`'s `MQTT_SERVICES["dashboard"]`). RESUS staying read-only/demo was a deliberate choice this pass, not an oversight; wiring it live would need the equivalent `shtf/trauma/command/#` write exception plus the actual state-consumption work above.
 - ⚠️ **Medical hub** — see Part 7.4. All five device types are hard-blocked by default pending real-hardware verification, not merely untested. Contour Next One's parser has a confirmed-correct rewrite awaiting hardware confirmation; Braun ThermoScan 7 as specified has no Bluetooth radio and cannot be fixed at all (see Part 7.4).
+- ⚠️ **Mesh relay (`mesh/specter_mesh_relay.py`)** — internal comms and alarm notification over a LoRa mesh (Meshtastic firmware, 915MHz US ISM band), added August 2026 in response to an operator request for alarm notification independent of the LAN/dashboard. Built against the real `meshtastic` PyPI package (v2.7.11) and its documented API (`SerialInterface`, `sendAlert`/`sendText`, pypubsub receive topics) - not guessed, and one real hardware-detection bug was found and worked around by reading that library's source rather than assuming: `SerialInterface(devPath=None)` calls a bare `sys.exit(1)`, not a catchable exception, when more than one candidate USB-serial port is found, which would have silently killed the whole systemd service on any Node 1 with a second USB-serial device attached (a GPS puck, another radio). `MeshtasticHardware.resolve_port()` always resolves the port itself first and never lets that code path execute - covered by a test against the real library, not a mock, so it stays protected against future `meshtastic` releases changing that behavior again. It subscribes to `shtf/trauma/alert`, `shtf/ward/alert`, and `shtf/system/alarm` and relays new-or-changed alarms onto the mesh, using Meshtastic's higher-priority `sendAlert()` API for anything containing a `critical`-level alert and plain `sendText()` otherwise; an unchanged alert set is only re-announced every 15 minutes (`REALERT_INTERVAL_SECONDS`) rather than every time its source republishes (the ward module alone republishes every 30s regardless of change) - LoRa airtime is scarce and shared across the whole mesh, and flooding it would be worse than not relaying at all. Inbound mesh text relays back onto `shtf/mesh/inbound`, and `shtf/mesh/command/send` accepts operator-composed outbound messages, so this is genuinely bidirectional, not alarm-only. **NOT run against a real Meshtastic radio** - same hardware-gating discipline as the medical BLE devices: if nothing is attached (true today, true in CI), the service idles cleanly and retries every 30s rather than crashing or blocking anything else. What "encrypted" means here: Meshtastic's own per-channel AES-256-CTR pre-shared key, configured on the physical radio with Meshtastic's own CLI/app during hardware setup - this service sends/receives on whatever channel the radio already has configured and does not implement or manage encryption itself, deliberately, for the same reason SPECTER doesn't reimplement NEWS2 scoring or MQTT auth from scratch when a well-tested version already exists. Delivery is best-effort (`wantAck=False`, no retry/confirmation tracking) - "no reply on the mesh" means exactly that, not "message not sent" or "everyone is fine."
 - ⚠️ **Medical AI engine** — logic is sound, but MedGemma output quality on your specific patient profiles is unverified. Run practice queries with known cases before you need it.
 - ⚠️ **Library RAG** — index builder exists; retrieval quality across the PDF corpus is untested.
 - ⚠️ **MQTT broker authentication and per-service ACLs** — the broker previously ran with `allow_anonymous true` and no password: anyone on the wired LAN could read every patient's vitals/diagnosis in cleartext or publish a forged trauma command with nothing to reject it. It now requires auth, with a **separate least-privilege account per service** (see `MQTT_SERVICES` in `deploy/install_specter.py`) rather than one shared login, so a leaked dashboard credential can't be used to forge a trauma command - the ACL file only lets it read. All of this is wired through every service and generated automatically by the installer, but has been verified with unit tests and code review only — **not yet exercised against a real multi-node mesh**. Before relying on it: confirm every node actually connects post-install (`journalctl -u specter-<name>` should show no `rc=5 Not authorised` errors), confirm each service can actually publish/subscribe its own topics (a valid credential with the wrong ACL entry fails *silently* - check `mosquitto.log` for `Denied` lines, Part 6.2), and confirm an unauthenticated `mosquitto_pub` is rejected outright. Traffic is still unencrypted (no TLS) — this blocks casual/opportunistic access and limits blast radius from one leaked credential, it does not defend against a device already trusted enough to hold a valid one.
+- ✅ **Deprecated Eventlet runtime removed** — the dashboard now uses
+  Flask-SocketIO's maintained threading/simple-websocket backend. Eventlet is
+  absent from production and test dependency manifests.
+- ⚠️ **Test coverage is real but uneven** — CI publishes a per-file report and
+  enforces a 65% project-wide floor. Focused tests now cover the coordinator,
+  SDR-control, thermal, dashboard-auth/TLS, MQTT-auth, persistence-corruption,
+  and RX timeout paths, but blocking service loops and real hardware I/O remain
+  less covered than the pure trauma/WARD/clinical logic.
 
 ## 7.3 Specified but not built
 
-- ❌ **WARD mode** — fully specified in `SPECTER_CLINICAL_MODES.md` (fluid balance, care task scheduler, skin map, mobility log). **No code exists.** This is the highest-probability scenario and the largest gap in the system.
-- ❌ **PATIENT screen** — the flowsheet dashboard exists as a design spec and a rendered mockup, not as working code wired to MQTT.
+- ❌ **PATIENT screen** — the flowsheet dashboard exists as a design spec and a rendered mockup, not as working code wired to MQTT. The data it needs (raw vitals plus MAP/pulse pressure/shock index/NEWS2/qSOFA/fever burden/Δ-from-baseline) is now real and published to `shtf/medical/derived/<patient_id>` (Part 7.1) - what's missing is the screen itself, not the numbers behind it.
+- ⚠️ **Canonical seven-part 12-lead ECG pipeline — software integrated, artifacts/hardware not commissioned.** The locked combination is: **(1) Biocare iE300** acquisition, **(2) DeepECG-SL** primary research classifier, **(3) AntonioR92** six-label regression baseline, **(4) ECG-XPLAIM** later explainable secondary model, **(5) PTB-XL plus other external datasets** as the test corpus, **(6) MedGemma** as the constrained explanation/context layer, and **(7) ExChanGeAI concepts** for evaluation and ONNX model lifecycle management. SPECTER now has separate strict generic XML, HL7 aECG, and public WFDB ingestion paths; source-rate preservation through 8,000 Hz; evidence archiving; unit/lead/sample-rate/quality gates; explicitly non-vendor synthetic fixtures; model-specific preprocessing; hash-pinned isolated runners; an atomic model/ONNX registry; patient-split dataset validation; explicit disagreement records; retained MQTT results; source-aware MedGemma prompt integration; and an authenticated `/ecg` attribution screen. It remains disabled by default because no real Biocare XML, model artifacts or datasets were supplied. The generic/synthetic XML paths are not represented as Biocare-compatible. DeepECG's inspected EfficientNet release also lacks published thresholds, and the ECG-XPLAIM task is not yet chosen, so the software refuses to manufacture those details. See [ECG_AI_IMPLEMENTATION_STATUS.md](ECG_AI_IMPLEMENTATION_STATUS.md) for the exact commissioning gates. Until hardware-specific and clinician-reviewed validation passes, every output remains **RESEARCH ONLY / NOT FOR DIAGNOSIS** and may not drive treatment or autonomous alerts.
 - ❌ **Node 3/4/6 workloads** — GNU Radio flowgraphs, KrakenSDR DF calibration, passive radar DSP, Pi-Star/MMDVM config, FCC ID automation. Node roles are assigned; the software is not written.
 - ❌ **Hailo signal classification** — AI HAT+ 2 hardware is specified, the AMC model on RadioML is not implemented.
 - ❌ **Cold chain telemetry** — the BougeRV has no data output. Temperature logging is manual unless you add a separate BLE thermometer.
@@ -748,14 +832,15 @@ journalctl -u specter-thermal -n 100
 - 🔧 **AliveCor KardiaMobile parser — REMOVED in v1.1.0.** The original implementation fabricated a BLE characteristic that does not exist. The 6L uses a proprietary protocol and does rhythm determination in the Kardia app. **If you have an older copy of `specter_medical_hub.py`, delete it.**
 
   Two workable paths instead:
-  - **Polar H10** (~$90) — documented open BLE, continuous HR, RR intervals, and a real ECG waveform. Best fit for continuous monitoring and it feeds NEWS2 directly. **Implemented** as of this build via [`bleakheart`](https://github.com/fsmeraldi/bleakheart) (MPL-2.0), a maintained library for Polar's PMD interface — see `dev_type='polar_h10'` and `_collect_polar_h10_stream()` in `specter_medical_hub.py`. Streams 130Hz single-lead ECG (microvolts) plus heart rate and RR intervals for `polar_stream_seconds` (default 10s) per collection cycle, published to `shtf/medical/vitals/<patient>/ecg_waveform_uv` and the usual `pulse`/`rr_intervals_ms` topics. Delegating the protocol to a real source-checked library is a meaningfully lower-risk starting point than the hand-parsed devices above, but it is **still gated behind `SPECTER_VERIFIED_BLE_DEVICES`** like every other device — nothing here has been run against a real H10 yet, only against fakes built from bleakheart's actual installed source.
+  - **Polar H10** (~$90) — documented open BLE, continuous HR, RR intervals, and a real ECG waveform. Best fit for continuous monitoring and it feeds NEWS2 directly. **Implemented** as of this build via [`bleakheart`](https://github.com/fsmeraldi/bleakheart) (MPL-2.0), a maintained library for Polar's PMD interface — see `dev_type='polar_h10'` and `_collect_polar_h10_stream()` in `specter_medical_hub.py`. Streams 130Hz single-lead ECG (microvolts) plus heart rate and RR intervals for `polar_stream_seconds` (default 10s) per collection cycle, published to `shtf/medical/vitals/<patient>/ecg_waveform_uv` and the usual `pulse`/`rr_intervals_ms` topics. Delegating the protocol to a real source-checked library is a meaningfully lower-risk starting point than the hand-parsed devices above, but it is **still gated behind `SPECTER_VERIFIED_BLE_DEVICES`** like every other device — nothing here has been run against a real H10 yet. The isolated [Polar H10 validation harness and operator procedure](POLAR_H10_VALIDATION.md) are complete and verified offline; its live mode preserves raw evidence and never enables the production gate automatically.
   - **Original single-lead KardiaMobile** (~$79) — transmits over FM audio, which has been publicly demodulated ([`seemoo-lab/kardia-demod`](https://github.com/seemoo-lab/kardia-demod), GPLv3, needs GNU Radio). Gives a real waveform you can render and hand to MedGemma's multimodal input. Fully air-gapped. You own the accuracy. **Not yet implemented** — a real project for whoever picks up a KardiaMobile.
 
-  For a transplant recipient the high-value ECG use case is **hyperkalemia** (peaked T waves, widening QRS), which needs a waveform. A "normal/AFib" classification byte would not have told you anything useful anyway. The signal-processing layer that turns the Polar H10's waveform into measured QRS/T-wave numbers is now built — [`medical/ecg_analysis.py`](../medical/ecg_analysis.py), using [NeuroKit2](https://github.com/neuropsychology/NeuroKit) (MIT) for delineation. Two things worth knowing before trusting its output:
-  - **QRS duration is measured Q-peak-to-S-peak, not NeuroKit2's own `ECG_R_Onsets`/`ECG_R_Offsets` markers.** A parameter sweep across sample rates, heart rates, and random seeds (`tests/test_ecg_analysis.py`) found `R_Onsets`/`R_Offsets` measure 130-190ms even on physiologically normal synthetic beats — implausibly wide, and not what "QRS duration" means clinically. Q-to-S reproducibly lands in the normal 60-100ms range instead. This looks like a semantic mismatch in NeuroKit2's `'dwt'` method, not a bug in this project's code, but it has only been checked against NeuroKit2 0.2.13 and **synthetic waveforms** — never a real ECG with a clinically confirmed QRS duration.
-  - **The T-wave "peaked" flag is a T-wave/R-wave amplitude ratio threshold** (>0.75, chosen well above the ~0.34 ratio measured on normal synthetic beats to bias toward under- rather than over-flagging) — a much weaker proxy for the published tall/narrow/symmetric 12-lead criteria than the QRS flag is. Treat it as considerably less trustworthy.
+  For a transplant recipient the high-value ECG use case is **hyperkalemia** (peaked T waves, widening QRS), which needs a waveform. A "normal/AFib" classification byte would not have told you anything useful anyway. The signal-processing layer in [`medical/ecg_analysis.py`](../medical/ecg_analysis.py) uses [NeuroKit2](https://github.com/neuropsychology/NeuroKit) (MIT) for delineation, but its current morphology output is deliberately restricted to **experimental measurements**, not clinical findings:
+  - NeuroKit2 returns Q and S peak locations separately from R-onset/R-offset markers. The code therefore publishes `ecg_q_s_peak_interval_ms`, not `ecg_qrs_duration_ms`. A Q-to-S peak interval is not the clinical onset-to-offset QRS duration, and the code, UI, or MedGemma must not apply the clinical 120ms widened-QRS threshold to it.
+  - R/T amplitudes are published as absolute amplitudes and their per-beat median ratio (`ecg_r_wave_abs_amplitude_uv`, `ecg_t_wave_abs_amplitude_uv`, `ecg_t_r_abs_ratio`). The ratio is not a validated peaked-T-wave criterion. The former automatic hyperkalemia-style advisory flags have been removed.
+  - Each window reports `ecg_analysis_status=experimental_not_clinically_validated` plus the number of valid Q-R-S and R-T beat tuples. A morphology scalar is withheld unless at least three finite, correctly ordered beat tuples survive validation. Incomplete arrays, NaNs, invalid peak order, bad sampling rates, and NeuroKit2 failures degrade to an error/warning instead of escaping into the collector.
 
-  Neither flag has been checked against a single real hyperkalemic ECG, and the module says so in its own output (`disclaimer` field on every result). This data reaches the medical hub's MQTT vitals (`ecg_qrs_duration_ms`, `ecg_t_wave_amplitude_uv`, `ecg_r_wave_amplitude_uv`, `ecg_t_r_ratio`, `ecg_advisory_flags`) exactly like every other reading, **and is now wired into `specter_medical_ai.py`'s prompt** — `VitalsCache.to_prompt_block()` includes the derived scalars and renders each advisory flag as its own line, so MedGemma sees and reasons about them in context with everything else. The raw waveform and RR-interval arrays (`ecg_waveform_uv`, `rr_intervals_ms`) are deliberately excluded from the text prompt (`RAW_ARRAY_READING_TYPES`) — hundreds of bare numbers would waste context and tell a text model nothing useful; that data is future multimodal-input material, not implemented here. This closes the loop from "waveform on MQTT" to "MedGemma can reason about it" — it does not change anything about how much the underlying measurements themselves should be trusted.
+  These measurements have only been exercised against synthetic waveforms. They have **not** been validated against a physical Polar H10 and a simultaneous diagnostic ECG with clinician-measured reference intervals. The status and precise measurement names reach `specter_medical_ai.py`'s prompt alongside the scalars so MedGemma cannot silently receive the old diagnostic-looking labels. The raw waveform and RR-interval arrays (`ecg_waveform_uv`, `rr_intervals_ms`) remain excluded from the text prompt (`RAW_ARRAY_READING_TYPES`) — hundreds of bare numbers would waste context and are future multimodal-input material, not implemented here.
 
 - 🔧 **Omron / Masimo BLE parsers — HARD-BLOCKED by default (August 2026).** These weren't just untested — checked against Bluetooth SIG specifications and public reverse-engineering research, they show the same pattern as the removed Kardia parser: plausible-looking code that does not match how these devices actually communicate.
 
@@ -769,7 +854,11 @@ journalctl -u specter-thermal -n 100
 
 - 🔧 **Braun ThermoScan 7 — cannot be fixed as specified; not a parser bug.** Investigated alongside Contour Next One using the same methodology, with a different outcome: the physical device this kit's docs actually name, the plain **"ThermoScan 7" (IRT6520)**, has **no Bluetooth radio at all**. It's a basic ear thermometer — 9-reading on-device memory button, no app, no wireless sync of any kind — confirmed against Braun's own US/UK product pages and multiple independent reviews (August 2026). Braun sells a visually similar but distinct SKU, **"ThermoScan 7+ Connect"** (BLE 5.0, syncs to the Braun Family Care app), which is a different product requiring its own from-scratch protocol verification if the kit's hardware were swapped to it. `braun_thermoscan` stays hard-blocked permanently under the current kit — there is no real GATT traffic to capture from a device that has no radio, so unlike Contour there is no fix to make here in software. If the field kit is meant to include a Bluetooth-connected thermometer, replace the physical unit with the Connect model and treat it as a new, unverified device.
 
-- 🔧 **MQTT 1.x/2.x compatibility fallback recursed instead of falling back — FIXED (August 2026).** `_mqtt_client()` in `specter_trauma.py`, `specter_trauma_monitor.py`, `specter_medical_hub.py`, and `specter_medical_ai.py` caught the `AttributeError` from paho-mqtt 1.x lacking `CallbackAPIVersion` and called *itself* again instead of falling back to the old-style `mqtt.Client(client_id=...)` constructor. Since that `AttributeError` is deterministic — the attribute either exists or it doesn't, unaffected by retrying — every retry hit the identical error, recursing until `RecursionError`, which could prevent the trauma and medical hub/AI services from starting at all on a paho-mqtt 1.x install. All four now fall back correctly; regression tests simulate a 1.x-shaped `paho.mqtt.client` module (`tests/test_mqtt_auth.py::TestMqttClientCompatFallback`) rather than requiring an actual 1.x install.
+- 🔧 **MQTT callback API migration and 1.x fallback — FIXED (August 2026).**
+  Every Paho client, including the new WARD service, requests callback API
+  VERSION2 and uses its connect/disconnect signatures. The helpers retain a
+  non-recursive old-style constructor fallback for paho-mqtt 1.x; regression
+  tests cover both paths.
 
 - 🔧 **Trauma scene "persistence" only ever wrote, never restored — FIXED (August 2026).** `SceneRegistry._persist()` wrote `scene.json` on every mutation, but nothing ever read it back — a service restart (crash, power loss, upgrade) silently discarded the active scene even though the surrounding comments said persistence existed specifically to survive that. It also wrote the file in place, so a crash mid-write could leave a truncated/corrupt `scene.json`. Fixed: `SceneRegistry.__init__` now calls `_restore()`, which reconstructs every casualty (including full vitals history and tourniquet records — the old persisted shape was `scene_summary()`, which only kept the *latest* vitals reading, not the history) from disk. Writes go through a sibling `.tmp` file with `fsync()` then `os.replace()` (atomic on POSIX), plus a best-effort directory-entry `fsync`, so a crash mid-write can never leave `scene.json` corrupted — the file on disk is always either the complete old state or the complete new state. A corrupt or unrecognized-format file logs loudly and starts an empty scene rather than crashing the service or silently guessing at a malformed structure. See `tests/test_trauma.py::TestSceneRegistryPersistence`.
 
@@ -777,7 +866,7 @@ journalctl -u specter-thermal -n 100
   - **innerHTML XSS**: `addAlarm()` in `dashboard.html` built each alarm row with `innerHTML`, interpolating the alarm's `msg` field directly. Any MQTT publisher (see the ACL note in Part 7.2) could put `<img src=x onerror=...>` or similar into an alarm and run arbitrary JavaScript in every connected operator's browser. Now builds the row from DOM nodes with `textContent` — verified with a headless-browser test injecting exactly that payload and confirming no `<img>` tag lands in the DOM and no script runs.
   - **Hardcoded Flask `SECRET_KEY`**: was a literal string in source, so identical on every install (it's in the git repo) — not a secret. Now read from `specter.json`'s `dashboard.secret_key` if the installer sets one, else a random key generated per process start.
   - **`cors_allowed_origins="*"`**: let any origin's page drive the dashboard's WebSocket, including `trigger_rx`. Now defaults to flask-socketio's same-origin-only behavior (`None`) unless `specter.json`'s `dashboard.cors_allowed_origins` explicitly configures a trusted list.
-  - **`/resus` route missing**: `docs/SPECTER_MEDICAL_UI_BRIEF.md` and this manual (Part 8) document `http://192.168.1.1:5000/resus`, but `dashboard_server.py` only routed `/`, `/api/state`, `/api/status`. Added.
+  - **`/resus` route missing**: the medical UI brief documented `/resus`, but `dashboard_server.py` only routed `/`, `/api/state`, and `/api/status`. Added at `https://192.168.1.1/resus`.
   - **Offline dashboard depended on the internet**: `dashboard.html` loaded Socket.IO and D3 from `cdnjs.cloudflare.com` — on a genuinely offline network both `io` and `d3` came back `undefined` and the dashboard's core script failed outright, which is the opposite of what an offline-first emergency dashboard needs. Both are now vendored locally under `dashboard/vendor/` (same exact versions, MIT/ISC licensed) and served by Flask's static route.
   - **RF waterfall permanently simulated with no indication**: the spectrum panel renders random noise unconditionally — there is no real waterfall MQTT topic, server handler, or SDR pipeline anywhere in this codebase (Node 3/4/6 workloads remain unimplemented, Part 7.3). It now carries a permanent `SIMULATED DATA` badge and watermark rather than looking like live RF telemetry.
   - **Node health could stay green forever**: the server stamps a wrapper-level `last_seen` on every Pi status update, but it never reached the client (`applyFullState` discarded it; the live push never sent it), and nothing re-evaluated a node's dot color once painted — a Pi that reported once and then went dark stayed "healthy" indefinitely. `last_seen` now travels with both the live push and the full-state snapshot, and a client-side timer re-derives every dot's color every 5s from age, not just on new traffic. The "Pi count" badge was also counting every green dot on the page, including SDR hardware indicators sharing the same CSS class — scoped to the node-status panel only.
@@ -786,7 +875,26 @@ journalctl -u specter-thermal -n 100
   - **Version strings frozen at 1.0.0**: `dashboard_server.py`'s `VERSION` is bumped to reflect the fixes in this pass, and the dashboard footer now fetches it from `/api/status` instead of a hardcoded string in the HTML, so it can't drift again silently.
   - **Unpinned dependencies**: `requirements-dev.txt`, `deploy/install_specter.py`'s `PIP_PACKAGES`, and the `pip install` commands in this manual now pin exact versions for every package this repo's test suite actually exercises, so a field-kit rebuild months from now can't silently pull a materially different, untested version. A few Pi-hardware-only packages (`scipy`, `soundfile`, `pyaudio`, `pyserial`, `gps3`, `matplotlib`) remain unpinned — this project's test suite doesn't exercise them, so guessing a version to pin would be no more trustworthy than leaving them open; pin those once they get their own verification pass.
 
-  **Not fixed in this pass** — flagged, not silently left implied as done: RESUS is still demo-only and not wired to live trauma MQTT state (see the Part 7.2 entry above); the tourniquet-toggle-off inconsistency in RESUS is fixed (un-checking a MARCH step now logs an explicit correction event and marks the open tourniquet record `removed` rather than either leaving it silently ticking or deleting it — append-only, per the review's own recommendation), but RESUS's cards/checklist rows are now keyboard-operable (added `tabindex`/`role="button"`/Enter-Space handling, with focus preserved across the once-a-second redraw) while the "Ask MedGemma"/"Ward"/"Chronic" controls are now explicitly labeled `NOT INSTALLED` rather than looking clickable and doing nothing. Full operator authentication (a real login/session system) for the dashboard and RESUS was not built — that's a genuine new feature, not a fix, and needs its own design pass.
+  **Not fixed in this pass** — flagged, not silently left implied as done: RESUS is still demo-only and not wired to live trauma MQTT state (see the Part 7.2 entry above); the tourniquet-toggle-off inconsistency in RESUS is fixed (un-checking a MARCH step now logs an explicit correction event and marks the open tourniquet record `removed` rather than either leaving it silently ticking or deleting it — append-only, per the review's own recommendation), but RESUS's cards/checklist rows are now keyboard-operable (added `tabindex`/`role="button"`/Enter-Space handling, with focus preserved across the once-a-second redraw) while the "Ask MedGemma"/"Ward"/"Chronic" controls are now explicitly labeled `NOT INSTALLED` rather than looking clickable and doing nothing.
+
+- 🔧 **Dashboard authentication and browser transport — FIXED (August 2026).**
+  Dashboard, RESUS, WARD, state API, vendor assets, and Socket.IO control
+  events require an installer-generated operator login. Passwords are stored
+  as PBKDF2 hashes; login is CSRF-protected; sessions use HttpOnly,
+  SameSite=Strict, Secure cookies and expire after eight hours. `/api/status`
+  remains public as a minimal health probe.
+
+  The installer binds Flask to `127.0.0.1:5000`, generates a stable 3072-bit
+  RSA certificate with the node IP in its subject-alt-name, and exposes only
+  an Nginx TLS 1.2/1.3 endpoint. Verify the certificate fingerprint out of
+  band from `/etc/specter/tls/dashboard.sha256`, then import/trust
+  `/etc/specter/tls/dashboard.crt` on operator devices. Accepting an
+  unverified self-signed certificate does not protect the first connection
+  against impersonation.
+
+  **Still not built**: per-operator accounts/audit attribution and separate
+  read-only/full-control roles. MQTT ACLs isolate services, but MQTT command
+  payloads do not contain a per-human operator identity.
 
 ## 7.5 The binding constraint
 
@@ -823,14 +931,31 @@ python3 /opt/specter/services/specter_rx_ring_buffer.py list-devices
 # Medical
 python3 /opt/specter/medical/specter_medical_ai.py --ask "QUESTION" --patient operator
 /opt/specter/scripts/specter-ask "How do I treat a tension pneumothorax?"
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json status
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json import EXAM.xml
+
+# Import a licensed public 12-lead WFDB record without calling it Biocare data
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json import-wfdb /data/ptb-xl/records100/00000/00001_lr \
+  --patient-id DATASET-PATIENT-ID --study-id 00001_lr \
+  --acquired-at 2000-01-01T00:00:00Z --device "PTB-XL source recorder" \
+  --dataset-id ptb-xl --dataset-version 1.0.3 --dataset-license "ODbL 1.0"
+
+# Generate a plumbing fixture; output declares vendorCompatibility=none
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json make-synthetic-xml /data/ptb-xl/records100/00000/00001_lr \
+  --patient-id SYNTHETIC-PTB-1 --study-id 00001_lr \
+  --acquired-at 2000-01-01T00:00:00Z --device "PTB-XL source recorder" \
+  --dataset-id ptb-xl --dataset-version 1.0.3 --dataset-license "ODbL 1.0" \
+  --output /mnt/specter/live/ecg/inbox/ptb-fixture.xml
 
 # Trauma
 python3 /opt/specter/trauma/specter_trauma.py --print-protocol > march_card.txt
 python3 /opt/specter/trauma/specter_trauma_monitor.py --mqtt-host 192.168.1.1
 
 # Web
-http://192.168.1.1:5000       Dashboard
-http://192.168.1.1:5000/resus RESUS screens
+https://192.168.1.1           Dashboard (operator login required)
+https://192.168.1.1/resus     RESUS screens (demo, not live - Part 7.2)
+https://192.168.1.1/ward      WARD screen (live)
+https://192.168.1.1/ecg       12-lead ECG research review (structured results; no waveform arrays)
 http://192.168.1.5:8080       Kiwix library
 http://192.168.1.10:11434     Ollama API
 ```
@@ -845,6 +970,8 @@ http://192.168.1.10:11434     Ollama API
 | `/var/lib/specter/scene.json` | Trauma scene state |
 | `/mnt/specter/library/` | Kiwix ZIM + PDF corpus (Node 5) |
 | `/mnt/specter/live/recordings/` | RF captures + sidecar JSON |
+| `/mnt/specter/live/ecg/inbox/` | Biocare XML import inbox |
+| `/mnt/specter/archive/ecg/` | Immutable ECG sources, canonical waveforms, metadata and analyses |
 | `/run/specter/sdr_trigger` | RX trigger file |
 
 ## Alarm thresholds

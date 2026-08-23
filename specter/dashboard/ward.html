@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPECTER · WARD</title>
+<script src="/dashboard/vendor/socket.io.min.js"></script>
+<style>
+/* Same palette/typographic language as resus.html - a clinical
+   instrument, not a HUD. This screen is genuinely live (Socket.IO,
+   real MQTT round trip via the dashboard's narrow write-scoped
+   credential - see dashboard_server.py's ward_command handler), unlike
+   resus.html which is still local-demo-only. */
+:root{
+  --ground:#060B0C;--panel:#0B1315;--panel-2:#0E181B;
+  --edge:#1B2A2D;--edge-hot:#25383C;
+  --bone:#C6D8D2;--dim:#5E7B75;--dimmer:#3C5450;
+  --phos:#3FE0A0;--phos-deep:#1E8A5F;
+  --amber:#F0B028;--amber-deep:#6B4A0F;
+  --red:#FF4D4D;--red-deep:#8C1F1F;
+  --inert:#6BA8D6;--inert-deep:#2A5570;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--ground);color:var(--bone);
+  font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;
+  font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;min-height:100vh;
+}
+.lbl{font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+.tnum{font-variant-numeric:tabular-nums}
+button{font:inherit;cursor:pointer}
+input{font:inherit;background:var(--panel-2);border:1px solid var(--edge-hot);color:var(--bone);padding:6px 8px}
+
+header{display:flex;border-bottom:1px solid var(--edge);background:var(--panel);min-height:60px;align-items:center}
+.scene-id{padding:8px 16px;border-right:1px solid var(--edge);min-width:230px}
+nav{display:flex;flex:1;align-items:center;overflow-x:auto}
+nav button{background:none;border:none;border-right:1px solid var(--edge);
+  color:var(--dim);font-size:11px;letter-spacing:.1em;padding:0 18px;height:60px;text-transform:uppercase;white-space:nowrap}
+nav button:hover{color:var(--bone);background:var(--panel-2)}
+nav button.on{color:var(--phos);background:var(--panel-2);box-shadow:inset 0 -2px 0 var(--phos)}
+.brand{padding:8px 16px;border-left:1px solid var(--edge);text-align:right;
+  display:flex;flex-direction:column;justify-content:center;min-width:170px}
+.brand .name{font-size:16px;letter-spacing:.3em}
+.brand .meta{font-size:9px;color:var(--dimmer);letter-spacing:.1em;margin-top:2px}
+#conn{font-size:9px;letter-spacing:.1em;padding:2px 8px;border:1px solid;margin-top:3px;display:inline-block}
+#conn.up{color:var(--phos);border-color:var(--phos-deep)}
+#conn.down{color:var(--red);border-color:var(--red)}
+
+.rail{border-bottom:1px solid var(--edge);padding:8px 16px}
+.rail.quiet{background:rgba(63,224,160,.07);border-bottom-color:var(--phos-deep)}
+.rail.hot{background:rgba(255,77,77,.10);border-bottom-color:var(--red-deep)}
+.rail-row{display:flex;align-items:center;gap:11px;padding:2px 0}
+.rail-row+.rail-row{margin-top:4px;padding-top:5px;border-top:1px solid rgba(255,255,255,.05)}
+.tag{font-size:9px;letter-spacing:.12em;padding:2px 6px;border:1px solid;flex-shrink:0;font-weight:600}
+.tag.crit{color:var(--red);border-color:var(--red);background:rgba(255,77,77,.1)}
+.tag.caut{color:var(--amber);border-color:var(--amber);background:rgba(240,176,40,.08)}
+.tag.ok{color:var(--phos);border-color:var(--phos-deep)}
+.rail-text{flex:1;font-size:12px}
+
+main{flex:1;padding:13px 16px;overflow:auto}
+.empty{padding:40px;text-align:center;color:var(--dim)}
+.empty .big{font-size:16px;color:var(--bone);margin-bottom:8px}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:11px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+
+.panel{border:1px solid var(--edge);background:var(--panel);margin-bottom:11px}
+.panel-head{padding:7px 12px;border-bottom:1px solid var(--edge);background:var(--panel-2);
+  font-size:10px;letter-spacing:.14em;color:var(--dim);display:flex;justify-content:space-between}
+.panel-body{padding:11px 12px}
+
+.episode-head{border:1px solid var(--edge);border-left:5px solid var(--phos);
+  background:var(--panel);padding:10px 13px;margin-bottom:11px;display:flex;
+  align-items:center;gap:16px;flex-wrap:wrap}
+.episode-head .day{font-size:20px;font-weight:600}
+.episode-head .news2{margin-left:auto;text-align:right}
+.episode-head .news2 .v{font-size:22px;font-weight:600}
+.episode-head .news2 .v.low{color:var(--phos)}
+.episode-head .news2 .v.medium,.episode-head .news2 .v.low-medium{color:var(--amber)}
+.episode-head .news2 .v.high{color:var(--red)}
+.episode-head .news2 .v.unknown{color:var(--dimmer)}
+
+.fb-bar{height:20px;background:var(--panel-2);border:1px solid var(--edge-hot);position:relative;overflow:hidden;margin-top:6px}
+.fb-bar .fill{position:absolute;top:0;bottom:0;left:50%}
+.fb-bar .fill.pos{background:rgba(63,224,160,.4)}
+.fb-bar .fill.neg{background:rgba(255,77,77,.4)}
+.fb-row{display:flex;justify-content:space-between;font-size:12px;margin-top:6px}
+.fb-row .k{color:var(--dim);font-size:10px}
+
+.task{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid rgba(255,255,255,.035)}
+.task:first-child{border-top:none}
+.task-body{flex:1;min-width:0}
+.task-label{font-size:12px}
+.task-due{font-size:10px;color:var(--dim);margin-top:2px}
+.task.overdue .task-due{color:var(--red)}
+.task-btn{background:none;border:1px solid var(--edge-hot);color:var(--dim);
+  font-size:10px;padding:5px 11px;letter-spacing:.08em}
+.task-btn:hover{color:var(--phos);border-color:var(--phos-deep)}
+
+.skin-row,.mob-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.dot{width:12px;height:12px;border-radius:50%;border:1px solid var(--edge-hot);flex-shrink:0}
+.dot.intact{background:var(--phos-deep)}
+.dot.blanching_erythema{background:var(--amber-deep)}
+.dot.broken{background:var(--amber)}
+.dot.non_blanching{background:var(--red)}
+.site{font-size:10px;color:var(--dim);display:flex;align-items:center;gap:5px}
+
+.vitals-table{width:100%;border-collapse:collapse;font-size:11px}
+.vitals-table th{text-align:left;color:var(--dim);font-size:9px;letter-spacing:.08em;
+  text-transform:uppercase;padding:4px 6px;border-bottom:1px solid var(--edge)}
+.vitals-table td{padding:4px 6px;border-bottom:1px solid rgba(255,255,255,.035)}
+
+.form-row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center}
+.form-row input{flex:1;min-width:80px}
+
+.caveat{font-size:10px;color:var(--dim);line-height:1.5;padding:8px 0 0;border-top:1px solid var(--edge);margin-top:8px}
+
+footer{padding:6px 16px;border-top:1px solid var(--edge);font-size:9.5px;color:var(--dimmer);
+  display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="scene-id">
+    <div class="lbl">Ward</div>
+    <div style="font-size:18px;font-weight:600;margin-top:2px">Sustained care</div>
+    <div id="conn" class="down">CONNECTING</div>
+  </div>
+  <nav id="episodeNav"></nav>
+  <div class="brand">
+    <div class="name">SPECTER</div><div class="meta">WARD · LIVE MQTT</div>
+  </div>
+</header>
+
+<div class="rail" id="rail"></div>
+
+<main id="main"></main>
+
+<footer>
+  <span>Decision support for a trained responder. NEWS2 is a screening aid, not a diagnosis - see the caveat on every episode.</span>
+  <span>MQTT · shtf/ward/#</span>
+</footer>
+
+<script>
+"use strict";
+
+const esc = s => String(s).replace(/[&<>]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
+
+let episodes = [];
+let selectedId = null;
+
+const socket = io();
+socket.on("connect", () => { document.getElementById("conn").textContent = "LIVE"; document.getElementById("conn").className = "up"; });
+socket.on("disconnect", () => { document.getElementById("conn").textContent = "OFFLINE"; document.getElementById("conn").className = "down"; });
+
+socket.on("state", state => applyWard((state.ward || {}).episodes || []));
+socket.on("ward_episode", data => applyWard(data.episodes || []));
+
+const seenAlarmKeys = new Set();
+socket.on("alarm", entry => {
+  const key = `${entry.time}|${JSON.stringify(entry.data)}`;
+  if (seenAlarmKeys.has(key)) return;
+  seenAlarmKeys.add(key);
+  renderRail();
+});
+// Alarms arrive via the same shtf/system/alarm-shaped 'alarm' event as
+// the main dashboard's alerts (see dashboard_server.py _on_ward_alert),
+// mixed with every other system alarm - the rail below only draws from
+// the currently selected episode's own active_alerts (already computed
+// server-side and included on each episode), not the global alarm feed,
+// so a trauma/thermal alarm elsewhere doesn't clutter this screen.
+
+function applyWard(list) {
+  episodes = list;
+  if (!episodes.find(e => e.episode_id === selectedId)) {
+    selectedId = episodes.length ? episodes[0].episode_id : null;
+  }
+  render();
+}
+
+function current() {
+  return episodes.find(e => e.episode_id === selectedId) || null;
+}
+
+function emit(cmd, extra) {
+  socket.emit("ward_command", Object.assign({cmd, episode_id: selectedId}, extra || {}));
+}
+
+function render() {
+  renderNav();
+  renderRail();
+  const main = document.getElementById("main");
+  const ep = current();
+  main.innerHTML = ep ? renderEpisode(ep) : renderOpenForm();
+  postRender();
+}
+
+function renderNav() {
+  const nav = document.getElementById("episodeNav");
+  nav.innerHTML = episodes.map(e =>
+    `<button class="${e.episode_id === selectedId ? "on" : ""}" data-id="${esc(e.episode_id)}">${esc(e.episode_id)} · ${esc(e.patient_id)}</button>`
+  ).join("") + `<button data-id="__new__">+ New episode</button>`;
+  nav.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+    if (b.dataset.id === "__new__") { selectedId = null; render(); }
+    else { selectedId = b.dataset.id; render(); }
+  }));
+}
+
+function renderRail() {
+  const ep = current();
+  const alerts = ep ? (ep.active_alerts || []) : [];
+  const r = document.getElementById("rail");
+  if (!alerts.length) {
+    r.className = "rail quiet";
+    r.innerHTML = `<div class="rail-row"><span class="tag ok">CLEAR</span>
+      <span class="rail-text">${ep ? "No active alerts for this episode" : "No episode selected"}</span></div>`;
+    return;
+  }
+  r.className = "rail hot";
+  r.innerHTML = alerts.slice(0, 3).map(a => `<div class="rail-row">
+    <span class="tag ${a.level === "critical" ? "crit" : "caut"}">${a.level === "critical" ? "CRITICAL" : "CAUTION"}</span>
+    <span class="rail-text">${esc(a.text)}</span></div>`).join("") +
+   (alerts.length > 3 ? `<div class="rail-row"><span class="rail-text" style="color:var(--dim);font-size:10px">+${alerts.length - 3} more</span></div>` : "");
+}
+
+function renderOpenForm() {
+  return `<div class="empty">
+    <div class="big">No active ward episode</div>
+    <div>Open one to start tracking fluid balance, care tasks, and vitals for a patient in sustained bed care.</div>
+    <div class="form-row" style="justify-content:center;max-width:420px;margin:16px auto 0">
+      <input id="newPatientId" placeholder="patient id (e.g. patient-1)">
+      <input id="newProblem" placeholder="presenting problem">
+      <button class="task-btn" id="btnOpenEpisode">OPEN EPISODE</button>
+    </div>
+  </div>`;
+}
+
+function attachOpenFormHandler() {
+  const btn = document.getElementById("btnOpenEpisode");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const patientId = document.getElementById("newPatientId").value.trim();
+    const problem = document.getElementById("newProblem").value.trim();
+    if (!patientId) return;
+    socket.emit("ward_command", {cmd: "open_episode", patient_id: patientId, presenting_problem: problem});
+  });
+}
+
+function newsClass(news2) {
+  if (!news2) return "unknown";
+  return (news2.risk || "unknown").replace(" ", "-");
+}
+
+function renderEpisode(ep) {
+  const fb = ep.fluid_balance || {};
+  const news2 = ep.latest_news2;
+  const html = `
+    <div class="episode-head">
+      <div>
+        <div class="lbl">Day ${ep.day_number || 1} of episode</div>
+        <div class="day">${esc(ep.presenting_problem || "unclassified")}</div>
+        <div class="lbl" style="margin-top:2px">${esc(ep.patient_id)} · opened ${esc(ep.elapsed_display)} ago · obs every ${ep.observation_interval_minutes}m</div>
+      </div>
+      <div class="news2">
+        <div class="lbl">NEWS2${news2 && news2.partial ? " (partial)" : ""}</div>
+        <div class="v ${newsClass(news2)}">${news2 ? news2.total : "—"}</div>
+        <div class="lbl">${news2 ? news2.risk.toUpperCase() : "NOT RECORDED"}${ep.news2_rising ? " · RISING" : ""}</div>
+      </div>
+      <button class="task-btn" id="btnCloseEpisode">CLOSE EPISODE</button>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="panel">
+          <div class="panel-head"><span>Fluid balance (24h)</span><span>cumulative ${fmtMl(fb.cumulative_net_ml)}</span></div>
+          <div class="panel-body">
+            <div class="fb-row"><span class="k">IN</span><span class="tnum">${fmtMl(fb.intake_24h_ml)}</span></div>
+            <div class="fb-row"><span class="k">OUT</span><span class="tnum">${fmtMl(fb.output_24h_ml)}</span></div>
+            <div class="fb-row"><span class="k">NET</span><span class="tnum">${fmtMl(fb.net_24h_ml)}</span></div>
+            <div class="form-row">
+              <input id="fbVolume" type="number" placeholder="mL">
+              <input id="fbDesc" placeholder="description">
+              <button class="task-btn" id="btnIntake">+ INTAKE</button>
+              <button class="task-btn" id="btnOutputUrine">+ OUTPUT (urine)</button>
+              <button class="task-btn" id="btnOutputStool">+ OUTPUT (stool)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><span>Skin checks</span><span>last: ${esc(ep.latest_skin_finding || "none")}</span></div>
+          <div class="panel-body">
+            <div class="skin-row" id="skinSites"></div>
+            <div class="form-row"><button class="task-btn" id="btnSkinCheck">RECORD SKIN CHECK (all intact)</button></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><span>Mobility &amp; intake</span></div>
+          <div class="panel-body">
+            <div class="form-row">
+              <button class="task-btn" data-level="bedbound">BEDBOUND</button>
+              <button class="task-btn" data-level="sat_edge">SAT EDGE</button>
+              <button class="task-btn" data-level="stood">STOOD</button>
+              <button class="task-btn" data-level="walked_assisted">WALKED (assisted)</button>
+            </div>
+            <div class="form-row">
+              <input id="nutritionDesc" placeholder="meal description">
+              <input id="nutritionPct" type="number" placeholder="% consumed" style="max-width:110px">
+              <button class="task-btn" id="btnNutrition">LOG MEAL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <div class="panel-head"><span>Care due</span><span>${(ep.care_tasks || []).length} tasks</span></div>
+          <div class="panel-body" id="careTasks"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><span>Vitals</span><span>${(ep.vitals || []).length} recorded</span></div>
+          <div class="panel-body">
+            <div class="form-row">
+              <input id="vRr" type="number" placeholder="RR">
+              <input id="vSpo2" type="number" placeholder="SpO2 %">
+              <input id="vSbp" type="number" placeholder="SBP">
+              <input id="vPulse" type="number" placeholder="Pulse">
+              <input id="vTemp" type="number" step="0.1" placeholder="Temp C">
+              <button class="task-btn" id="btnVitals">RECORD VITALS</button>
+            </div>
+            <table class="vitals-table" style="margin-top:8px">
+              <thead><tr><th>Time</th><th>NEWS2</th><th>RR</th><th>SpO2</th><th>SBP</th><th>Pulse</th><th>Temp</th></tr></thead>
+              <tbody id="vitalsBody"></tbody>
+            </table>
+            <div class="caveat">${esc(ep.news2_caveat || "")}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  return html;
+}
+
+function fmtMl(v) {
+  if (v === undefined || v === null) return "—";
+  const sign = v > 0 ? "+" : "";
+  return `${sign}${v.toFixed(0)} mL`;
+}
+
+function postRender() {
+  const ep = current();
+  attachOpenFormHandler();
+  if (!ep) return;
+
+  const closeBtn = document.getElementById("btnCloseEpisode");
+  if (closeBtn) closeBtn.addEventListener("click", () => emit("close_episode"));
+
+  const btnIntake = document.getElementById("btnIntake");
+  if (btnIntake) btnIntake.addEventListener("click", () => {
+    const volume_ml = parseFloat(document.getElementById("fbVolume").value);
+    if (!volume_ml) return;
+    emit("intake", {route: "oral", volume_ml, description: document.getElementById("fbDesc").value});
+  });
+  const btnOutU = document.getElementById("btnOutputUrine");
+  if (btnOutU) btnOutU.addEventListener("click", () => {
+    const volume_ml = parseFloat(document.getElementById("fbVolume").value);
+    if (!volume_ml) return;
+    emit("output", {route: "urine", volume_ml, description: document.getElementById("fbDesc").value});
+  });
+  const btnOutS = document.getElementById("btnOutputStool");
+  if (btnOutS) btnOutS.addEventListener("click", () => {
+    emit("output", {route: "stool", volume_ml: parseFloat(document.getElementById("fbVolume").value) || 0,
+      description: document.getElementById("fbDesc").value});
+  });
+
+  const skinWrap = document.getElementById("skinSites");
+  const SITES = ["sacrum", "heels_l", "heels_r", "elbows_l", "elbows_r", "occiput", "hips_l", "hips_r"];
+  const latestSites = (ep.skin_checks && ep.skin_checks.length)
+    ? ep.skin_checks[ep.skin_checks.length - 1].sites : {};
+  skinWrap.innerHTML = SITES.map(s =>
+    `<span class="site"><span class="dot ${esc(latestSites[s] || "intact")}"></span>${s.replace("_", " ")}</span>`
+  ).join("");
+  const btnSkin = document.getElementById("btnSkinCheck");
+  if (btnSkin) btnSkin.addEventListener("click", () => {
+    const sites = {}; SITES.forEach(s => sites[s] = "intact");
+    emit("skin_check", {sites});
+  });
+
+  document.querySelectorAll("[data-level]").forEach(b => b.addEventListener("click", () =>
+    emit("mobility", {level: b.dataset.level, duration_minutes: 5})));
+
+  const btnNutrition = document.getElementById("btnNutrition");
+  if (btnNutrition) btnNutrition.addEventListener("click", () => {
+    emit("nutrition", {
+      description: document.getElementById("nutritionDesc").value,
+      percent_consumed: parseFloat(document.getElementById("nutritionPct").value) || null,
+    });
+  });
+
+  const tasksWrap = document.getElementById("careTasks");
+  const tasks = ep.care_tasks || [];
+  tasksWrap.innerHTML = tasks.length ? tasks.map(t => `<div class="task ${t.overdue_minutes > 0 ? "overdue" : ""}">
+    <div class="task-body"><div class="task-label">${esc(t.label)}</div>
+    <div class="task-due">${esc(t.due_display)}</div></div>
+    <button class="task-btn" data-task="${esc(t.task_id)}">DONE</button></div>`).join("")
+    : `<div class="lbl">No care tasks scheduled</div>`;
+  tasksWrap.querySelectorAll("[data-task]").forEach(b => b.addEventListener("click", () =>
+    emit("complete_task", {task_id: b.dataset.task})));
+
+  const btnVitals = document.getElementById("btnVitals");
+  if (btnVitals) btnVitals.addEventListener("click", () => {
+    const values = {};
+    const rr = parseFloat(document.getElementById("vRr").value); if (!isNaN(rr)) values.rr = rr;
+    const spo2 = parseFloat(document.getElementById("vSpo2").value); if (!isNaN(spo2)) values.spo2 = spo2;
+    const sbp = parseFloat(document.getElementById("vSbp").value); if (!isNaN(sbp)) values.bp_systolic = sbp;
+    const pulse = parseFloat(document.getElementById("vPulse").value); if (!isNaN(pulse)) values.pulse = pulse;
+    const temp = parseFloat(document.getElementById("vTemp").value); if (!isNaN(temp)) values.temperature_c = temp;
+    values.avpu = "A";
+    emit("vitals", {values});
+  });
+
+  const vBody = document.getElementById("vitalsBody");
+  const recent = (ep.vitals || []).slice(-8).reverse();
+  vBody.innerHTML = recent.map(v => `<tr>
+    <td>${esc((v.utc || "").substr(11, 8))}</td>
+    <td>${v.news2 ? v.news2.total : "—"}</td>
+    <td>${v.values.rr ?? "—"}</td>
+    <td>${v.values.spo2 ?? "—"}</td>
+    <td>${v.values.bp_systolic ?? "—"}</td>
+    <td>${v.values.pulse ?? "—"}</td>
+    <td>${v.values.temperature_c ?? "—"}</td>
+  </tr>`).join("") || `<tr><td colspan="7" class="lbl">No vitals recorded</td></tr>`;
+}
+</script>
+</body>
+</html>
