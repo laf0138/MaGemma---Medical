@@ -372,47 +372,40 @@ async def capture_live(
     ecg_queue: asyncio.Queue = asyncio.Queue()
     hr_queue: asyncio.Queue = asyncio.Queue()
 
-    async with client_factory(device) as client:
+    client_context = client_factory(device)
+    try:
+        client = await client_context.__aenter__()
+    except Exception as exc:
+        capture.capture_errors.append(f"Bluetooth connection failed: {exc}")
+        return capture
+
+    pmd = None
+    hr = None
+    try:
         pmd = pmd_factory(client, ecg_queue=ecg_queue)
         hr = hr_factory(client, queue=hr_queue, unpack=False)
-        try:
-            start_result = await pmd.start_streaming("ECG")
-            if not start_result or start_result[0] != 0:
-                message = start_result[1] if len(start_result) > 1 else "unknown error"
-                capture.capture_errors.append(f"ECG stream start failed: {message}")
-                return capture
-            capture.stream_start_succeeded = True
-            await hr.start_notify()
-            capture.hr_notify_start_succeeded = True
+        start_result = await pmd.start_streaming("ECG")
+        if not start_result or start_result[0] != 0:
+            message = start_result[1] if len(start_result) > 1 else "unknown error"
+            capture.capture_errors.append(f"ECG stream start failed: {message}")
+            return capture
+        capture.stream_start_succeeded = True
+        await hr.start_notify()
+        capture.hr_notify_start_succeeded = True
 
-            deadline = time.monotonic() + duration_s
-            while time.monotonic() < deadline:
-                remaining = deadline - time.monotonic()
-                try:
-                    dtype, timestamp_ns, payload = await asyncio.wait_for(
-                        ecg_queue.get(), timeout=min(0.25, remaining)
+        deadline = time.monotonic() + duration_s
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            try:
+                dtype, timestamp_ns, payload = await asyncio.wait_for(
+                    ecg_queue.get(), timeout=min(0.25, remaining)
+                )
+                if dtype == "ECG":
+                    capture.ecg_frames.append(
+                        EcgFrame(int(timestamp_ns), list(payload))
                     )
-                    if dtype == "ECG":
-                        capture.ecg_frames.append(
-                            EcgFrame(int(timestamp_ns), list(payload))
-                        )
-                except asyncio.TimeoutError:
-                    pass
-                while not hr_queue.empty():
-                    (
-                        _dtype,
-                        timestamp_ns,
-                        (average_bpm, rr_list),
-                        _energy,
-                    ) = hr_queue.get_nowait()
-                    capture.heart_rate_frames.append(
-                        HeartRateFrame(
-                            int(timestamp_ns), int(average_bpm), list(rr_list)
-                        )
-                    )
-            # An HR notification may have arrived after the final ECG queue
-            # read but before the deadline. Preserve it rather than silently
-            # leaving the last frame behind.
+            except asyncio.TimeoutError:
+                pass
             while not hr_queue.empty():
                 (
                     _dtype,
@@ -421,33 +414,52 @@ async def capture_live(
                     _energy,
                 ) = hr_queue.get_nowait()
                 capture.heart_rate_frames.append(
-                    HeartRateFrame(int(timestamp_ns), int(average_bpm), list(rr_list))
-                )
-        except Exception as exc:
-            capture.capture_errors.append(f"live capture failed: {exc}")
-        finally:
-            if capture.hr_notify_start_succeeded:
-                try:
-                    await hr.stop_notify()
-                    capture.hr_notify_stop_succeeded = True
-                except Exception as exc:
-                    capture.capture_errors.append(
-                        f"heart-rate notification stop failed: {exc}"
+                    HeartRateFrame(
+                        int(timestamp_ns), int(average_bpm), list(rr_list)
                     )
-            if capture.stream_start_succeeded:
-                try:
-                    stop_result = await pmd.stop_streaming("ECG")
-                    if stop_result and stop_result[0] == 0:
-                        capture.stream_stop_succeeded = True
-                    else:
-                        message = (
-                            stop_result[1]
-                            if stop_result and len(stop_result) > 1
-                            else "unknown error"
-                        )
-                        capture.capture_errors.append(f"ECG stream stop failed: {message}")
-                except Exception as exc:
-                    capture.capture_errors.append(f"ECG stream stop failed: {exc}")
+                )
+        # An HR notification may have arrived after the final ECG queue
+        # read but before the deadline. Preserve it rather than silently
+        # leaving the last frame behind.
+        while not hr_queue.empty():
+            (
+                _dtype,
+                timestamp_ns,
+                (average_bpm, rr_list),
+                _energy,
+            ) = hr_queue.get_nowait()
+            capture.heart_rate_frames.append(
+                HeartRateFrame(int(timestamp_ns), int(average_bpm), list(rr_list))
+            )
+    except Exception as exc:
+        capture.capture_errors.append(f"live capture failed: {exc}")
+    finally:
+        if capture.hr_notify_start_succeeded and hr is not None:
+            try:
+                await hr.stop_notify()
+                capture.hr_notify_stop_succeeded = True
+            except Exception as exc:
+                capture.capture_errors.append(
+                    f"heart-rate notification stop failed: {exc}"
+                )
+        if capture.stream_start_succeeded and pmd is not None:
+            try:
+                stop_result = await pmd.stop_streaming("ECG")
+                if stop_result and stop_result[0] == 0:
+                    capture.stream_stop_succeeded = True
+                else:
+                    message = (
+                        stop_result[1]
+                        if stop_result and len(stop_result) > 1
+                        else "unknown error"
+                    )
+                    capture.capture_errors.append(f"ECG stream stop failed: {message}")
+            except Exception as exc:
+                capture.capture_errors.append(f"ECG stream stop failed: {exc}")
+        try:
+            await client_context.__aexit__(None, None, None)
+        except Exception as exc:
+            capture.capture_errors.append(f"Bluetooth disconnect failed: {exc}")
     return capture
 
 
@@ -564,25 +576,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.self_test:
-        capture = synthetic_capture(args.duration)
-        prefix = "polar-h10-self-test"
-    elif args.replay:
-        capture = read_capture(args.replay)
-        capture.provenance = "replay"
-        prefix = "polar-h10-replay"
-    else:
-        capture = asyncio.run(
-            capture_live(
-                duration_s=args.duration,
-                selector=args.device,
-                scan_timeout_s=args.scan_timeout,
+    try:
+        if args.self_test:
+            capture = synthetic_capture(args.duration)
+            prefix = "polar-h10-self-test"
+        elif args.replay:
+            capture = read_capture(args.replay)
+            capture.provenance = "replay"
+            prefix = "polar-h10-replay"
+        else:
+            capture = asyncio.run(
+                capture_live(
+                    duration_s=args.duration,
+                    selector=args.device,
+                    scan_timeout_s=args.scan_timeout,
+                )
             )
-        )
-        prefix = "polar-h10-live"
+            prefix = "polar-h10-live"
 
-    report = validate_capture(capture)
-    output = write_artifacts(args.output or default_output_dir(prefix), capture, report)
+        report = validate_capture(capture)
+        output = write_artifacts(
+            args.output or default_output_dir(prefix), capture, report
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(json.dumps({"passed": False, "error": str(exc)}), file=sys.stderr)
+        return 2
     print(json.dumps({
         "passed": report["passed"],
         "hardware_integration_status": report["hardware_integration_status"],

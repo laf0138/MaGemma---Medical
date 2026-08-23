@@ -554,20 +554,40 @@ class MedicalHubBleCollector:
             devices = await scanner.discover(timeout=timeout, return_adv=True)
             
             self.discovered_devices = {}
-            for device, adv_data in devices.items():
-                device_name = device.name or device.address
+            # Bleak with return_adv=True returns
+            # {address: (BLEDevice, AdvertisementData)}.  The previous loop
+            # treated each address-string key as the BLEDevice, so every real
+            # scan failed at ``device.name`` and was swallowed by the broad
+            # exception below.  Accept the documented shape while retaining a
+            # list fallback for older/test scanner implementations.
+            entries = devices.values() if isinstance(devices, dict) else devices
+            for entry in entries:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    device, adv_data = entry
+                else:
+                    device, adv_data = entry, None
+                device_name = (
+                    getattr(device, 'name', None)
+                    or getattr(adv_data, 'local_name', None)
+                    or getattr(device, 'address', 'unknown')
+                )
+                device_address = getattr(device, 'address', device_name)
+                rssi = getattr(adv_data, 'rssi', getattr(device, 'rssi', None))
                 
                 # Check if device matches any medical device patterns
                 for dev_type, config in BluetoothDeviceConfig.DEVICES.items():
                     if config['name_pattern'].lower() in device_name.lower():
-                        self.discovered_devices[device.address] = {
+                        self.discovered_devices[device_address] = {
                             'name': device_name,
-                            'address': device.address,
+                            'address': device_address,
                             'type': dev_type,
-                            'rssi': device.rssi,
+                            'rssi': rssi,
                             'object': device
                         }
-                        logger.info(f"Found {dev_type}: {device_name} ({device.address}) RSSI: {device.rssi}")
+                        logger.info(
+                            f"Found {dev_type}: {device_name} "
+                            f"({device_address}) RSSI: {rssi}"
+                        )
             
             return self.discovered_devices
         

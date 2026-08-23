@@ -738,7 +738,13 @@ class OllamaClient:
             r.raise_for_status()
             names = [m.get("name", "") for m in r.json().get("models", [])]
             base = self.cfg.model.split(":")[0]
-            return any(n == self.cfg.model or n.startswith(base) for n in names)
+            # A prefix check incorrectly accepted similarly named models such
+            # as ``medgemma2`` for ``medgemma``. Tags may differ, but the base
+            # model name must match exactly.
+            return any(
+                n == self.cfg.model or n.split(":", 1)[0] == base
+                for n in names
+            )
         except Exception:
             return False
 
@@ -1107,19 +1113,23 @@ def main() -> None:
         # One-shot mode: connect briefly to absorb retained vitals, then answer.
         engine.mqtt.connect(cfg.mqtt_host, cfg.mqtt_port, keepalive=60)
         engine.mqtt.loop_start()
-        time.sleep(2)  # allow retained vitals messages to arrive
-        passages = engine.retriever.retrieve(args.ask, n_results=4)
-        prompt = engine.prompts.build(
-            patient_id=args.patient,
-            user_query=args.ask,
-            passages=passages,
-            retriever=engine.retriever,
-        )
-        print("\n" + "=" * 70)
-        print(engine.ollama.generate(prompt))
-        print("=" * 70 + "\n")
-        engine.mqtt.loop_stop()
-        engine.mqtt.disconnect()
+        try:
+            time.sleep(2)  # allow retained vitals messages to arrive
+            passages = engine.retriever.retrieve(args.ask, n_results=4)
+            prompt = engine.prompts.build(
+                patient_id=args.patient,
+                user_query=args.ask,
+                passages=passages,
+                retriever=engine.retriever,
+            )
+            print("\n" + "=" * 70)
+            print(engine.ollama.generate(prompt))
+            print("=" * 70 + "\n")
+        finally:
+            # One-shot inference failures must not leave the MQTT network
+            # thread or connection running in the caller's process.
+            engine.mqtt.loop_stop()
+            engine.mqtt.disconnect()
         return
 
     logger.info("=" * 60)

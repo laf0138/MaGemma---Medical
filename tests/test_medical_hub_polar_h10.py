@@ -139,6 +139,28 @@ class TestEcgWaveformCollection:
         assert FakeHeartRate.instances[-1].notify_started is True
         assert FakeHeartRate.instances[-1].notify_stopped is True
 
+    def test_stream_cleanup_failures_are_contained(self, hub, monkeypatch, caplog):
+        class StopFailPMD(FakePMD):
+            async def stop_streaming(self, measurement):
+                raise RuntimeError("ECG stop failed")
+
+        class StopFailHeartRate(FakeHeartRate):
+            async def stop_notify(self):
+                raise RuntimeError("HR stop failed")
+
+        monkeypatch.setattr(hub_mod, "PolarMeasurementData", StopFailPMD)
+        monkeypatch.setattr(hub_mod, "HeartRate", StopFailHeartRate)
+
+        result = asyncio.run(
+            hub._collect_polar_h10_stream(
+                object(), {"name": "Polar H10", "type": "polar_h10"}
+            )
+        )
+
+        assert result == {}
+        assert "ECG stop failed" in caplog.text
+        assert "HR stop failed" in caplog.text
+
 
 class TestHeartRateCollection:
     def test_heart_rate_constructed_with_unpack_false(self, hub):
@@ -227,6 +249,33 @@ class TestEcgAnalysisWiring:
         assert result["ecg_analysis_status"] == "experimental_not_clinically_validated"
         # Unvalidated morphology must not become a diagnostic-style alert.
         assert "ecg_advisory_flags" not in result
+
+    def test_analysis_warnings_are_preserved(self, hub, monkeypatch):
+        monkeypatch.setattr(
+            hub_mod,
+            "analyze_ecg_waveform",
+            lambda *_args, **_kwargs: {
+                "analysis_status": "experimental_not_clinically_validated",
+                "warnings": ["R-wave amplitude was zero; ratio withheld"],
+            },
+        )
+
+        async def run():
+            task = asyncio.ensure_future(
+                hub._collect_polar_h10_stream(
+                    object(), {"name": "Polar H10", "type": "polar_h10"}
+                )
+            )
+            await asyncio.sleep(0)
+            await FakePMD.instances[-1].ecg_queue.put(
+                ('ECG', 1_000_000, [0] * 130)
+            )
+            return await task
+
+        result = asyncio.run(run())
+        assert result["ecg_analysis_warnings"] == [
+            "R-wave amplitude was zero; ratio withheld"
+        ]
 
 
 class TestCollectFromDeviceDispatch:

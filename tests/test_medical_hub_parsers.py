@@ -144,5 +144,12 @@ class TestParseContourGlucometer:
     def test_short_payload_returns_empty_dict(self):
         assert MedicalDeviceParser.parse_contour_glucometer(bytes([0x02, 0x01])) == {}
 
+    def test_flags_claiming_missing_glucose_field_are_rejected(self):
+        flags = bytes([0x02])
+        seq = bytes([0x01, 0x00])
+        data = flags + seq + self.BASE_TIME
+        assert len(data) == 10
+        assert MedicalDeviceParser.parse_contour_glucometer(data) == {}
+
     def test_non_bytes_input_does_not_raise(self):
         assert MedicalDeviceParser.parse_contour_glucometer(None) == {}

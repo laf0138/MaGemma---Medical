@@ -159,6 +159,33 @@ class TestInputAndFailureSafety:
         result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
         assert "error" in result
 
+    @pytest.mark.parametrize("failure_stage", ["clean", "peaks"])
+    def test_neurokit_peak_detection_failures_are_contained(
+        self, monkeypatch, failure_stage
+    ):
+        if failure_stage == "clean":
+            monkeypatch.setattr(
+                ecg_analysis.nk,
+                "ecg_clean",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    ValueError("cleaning failed")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                ecg_analysis.nk, "ecg_clean", lambda signal, sampling_rate: signal
+            )
+            monkeypatch.setattr(
+                ecg_analysis.nk,
+                "ecg_peaks",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("peak detector failed")
+                ),
+            )
+        result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
+        assert result["error"].startswith("Peak detection failed:")
+        assert result["analysis_status"] == ANALYSIS_STATUS
+
     def test_delineation_failure_returns_partial_result(self, monkeypatch):
         _patch_neurokit(
             monkeypatch,
@@ -178,6 +205,21 @@ class TestInputAndFailureSafety:
 
 
 class TestMorphologyCompleteness:
+    def test_empty_delineation_arrays_withhold_all_morphology(self, monkeypatch):
+        _patch_neurokit(
+            monkeypatch,
+            [100, 230, 360, 490],
+            [],
+            [],
+            [],
+        )
+        result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
+        assert result["morphology_beats_analyzed"] == 0
+        assert result["amplitude_beats_analyzed"] == 0
+        assert "q_s_peak_interval_ms" not in result
+        assert "t_r_abs_ratio" not in result
+        assert len(result["warnings"]) == 2
+
     def test_mismatched_arrays_do_not_crash_or_broadcast(self, monkeypatch):
         _patch_neurokit(
             monkeypatch,
@@ -231,6 +273,58 @@ class TestMorphologyCompleteness:
         assert result["t_wave_abs_amplitude_uv"] == 800.0
         assert result["t_r_abs_ratio"] == pytest.approx(0.8)
         assert "flags" not in result
+
+    def test_zero_r_amplitudes_withhold_ratio(self, monkeypatch):
+        _patch_neurokit(
+            monkeypatch,
+            [100, 230, 360, 490],
+            [95, 225, 355, 485],
+            [105, 235, 365, 495],
+            [140, 270, 400, 530],
+            r_amplitude=0.0,
+            t_amplitude=200.0,
+        )
+        result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
+        assert result["r_wave_abs_amplitude_uv"] == 0.0
+        assert "t_r_abs_ratio" not in result
+        assert any("non-zero R amplitude" in warning for warning in result["warnings"])
+
+    def test_nan_and_out_of_range_peaks_are_excluded(self, monkeypatch):
+        _patch_neurokit(
+            monkeypatch,
+            [100, 230, 360, 490, 620],
+            [-1, 225, 355, float("nan"), 615],
+            [105, 235, 2000, 495, 625],
+            [float("nan"), -1, 400, 2000, 660],
+        )
+        result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
+        assert result["morphology_beats_analyzed"] == 2
+        assert "q_s_peak_interval_ms" not in result
+        assert result["amplitude_beats_analyzed"] == 2
+        assert "r_wave_abs_amplitude_uv" not in result
+        assert any("fewer than 3 valid Q-R-S" in warning for warning in result["warnings"])
+        assert any("fewer than 3 valid R-T" in warning for warning in result["warnings"])
+
+    def test_nonfinite_cleaned_peak_amplitude_is_excluded(self, monkeypatch):
+        rpeaks = [100, 230, 360, 490]
+        tpeaks = [140, 270, 400, 530]
+        _patch_neurokit(
+            monkeypatch,
+            rpeaks,
+            [95, 225, 355, 485],
+            [105, 235, 365, 495],
+            tpeaks,
+        )
+        original_clean = ecg_analysis.nk.ecg_clean
+
+        def nonfinite_clean(signal, sampling_rate):
+            cleaned = original_clean(signal, sampling_rate)
+            cleaned[rpeaks[0]] = np.nan
+            return cleaned
+
+        monkeypatch.setattr(ecg_analysis.nk, "ecg_clean", nonfinite_clean)
+        result = analyze_ecg_waveform([0] * 1300, sampling_rate=130)
+        assert result["amplitude_beats_analyzed"] == 3
 
     def test_t_peak_outside_its_beat_is_excluded(self, monkeypatch):
         _patch_neurokit(

@@ -116,6 +116,17 @@ class TestOfflineSelfTest:
         assert rows[-1]["sample_uv"] == 3
         assert rows[1]["timestamp_ns"] > rows[0]["timestamp_ns"]
 
+    @pytest.mark.parametrize("timestamp", [-1, 1.5, "100"])
+    def test_invalid_frame_timestamp_is_rejected(self, timestamp):
+        with pytest.raises(ValueError, match="invalid timestamp"):
+            reconstruct_samples([EcgFrame(timestamp_ns=timestamp, samples_uv=[1])])
+
+    def test_empty_frame_and_invalid_sample_rate_are_rejected(self):
+        with pytest.raises(ValueError, match="no ECG samples"):
+            reconstruct_samples([EcgFrame(timestamp_ns=1, samples_uv=[])])
+        with pytest.raises(ValueError, match="must be positive"):
+            reconstruct_samples([EcgFrame(timestamp_ns=1, samples_uv=[1])], 0)
+
     def test_missing_frame_fails_coverage(self):
         capture = synthetic_capture()
         del capture.ecg_frames[len(capture.ecg_frames) // 2]
@@ -153,6 +164,17 @@ class TestOfflineSelfTest:
         assert report["passed"] is False
         assert any("BPM" in error for error in report["errors"])
         assert any("RR interval" in error for error in report["errors"])
+
+    def test_missing_hr_is_warning_offline_but_failure_live(self):
+        capture = synthetic_capture()
+        capture.heart_rate_frames = []
+        offline = validate_capture(capture)
+        assert offline["passed"] is True
+        assert offline["warnings"] == ["no heart-rate notification frames were captured"]
+        capture.provenance = "live_hardware"
+        live = validate_capture(capture)
+        assert live["passed"] is False
+        assert "no heart-rate notification frames were captured" in live["errors"]
 
 
 class TestArtifacts:
@@ -195,6 +217,27 @@ class TestArtifacts:
 
 
 class TestLivePreparation:
+    @pytest.mark.parametrize("duration", [0, 9.99, float("nan")])
+    def test_live_capture_rejects_invalid_duration_before_scanning(self, duration):
+        with pytest.raises(ValueError, match="duration must be at least"):
+            asyncio.run(capture_live(duration, scanner=FakeScanner))
+
+    def test_scan_failure_and_no_match_are_reported(self):
+        class BrokenScanner:
+            @classmethod
+            async def discover(cls, **kwargs):
+                raise RuntimeError("adapter unavailable")
+
+        class EmptyScanner:
+            @classmethod
+            async def discover(cls, **kwargs):
+                return {}
+
+        with pytest.raises(RuntimeError, match="adapter unavailable"):
+            asyncio.run(find_polar_h10(scanner=BrokenScanner))
+        with pytest.raises(RuntimeError, match="No matching Polar H10"):
+            asyncio.run(find_polar_h10(scanner=EmptyScanner))
+
     def test_scan_rejects_ambiguous_h10_without_selector(self):
         second = FakeDevice()
         second.name = "Polar H10 OTHER"
@@ -255,3 +298,168 @@ class TestLivePreparation:
         assert report["passed"] is False
         assert report["hardware_integration_status"] == "FAIL"
         assert FakeHeartRate.instances[-1].stopped is False
+
+    def test_connection_interruption_returns_failed_capture(self, monkeypatch):
+        monkeypatch.setattr(validation, "MIN_CAPTURE_SECONDS", 0.01)
+
+        class LostClient(FakeClient):
+            async def __aenter__(self):
+                raise ConnectionError("device disappeared")
+
+        capture = asyncio.run(
+            capture_live(
+                duration_s=0.02,
+                scanner=FakeScanner,
+                client_factory=LostClient,
+                pmd_factory=FakePMD,
+                hr_factory=FakeHeartRate,
+            )
+        )
+        assert capture.capture_errors == [
+            "Bluetooth connection failed: device disappeared"
+        ]
+        assert validate_capture(capture)["hardware_integration_status"] == "FAIL"
+
+    def test_stream_stop_failure_is_recorded(self, monkeypatch):
+        monkeypatch.setattr(validation, "MIN_CAPTURE_SECONDS", 0.01)
+
+        class StopFailurePMD(FakePMD):
+            async def stop_streaming(self, measurement):
+                self.stopped = True
+                return 1, "INVALID STATE"
+
+        capture = asyncio.run(
+            capture_live(
+                duration_s=0.06,
+                scanner=FakeScanner,
+                client_factory=FakeClient,
+                pmd_factory=StopFailurePMD,
+                hr_factory=FakeHeartRate,
+            )
+        )
+        assert capture.stream_stop_succeeded is False
+        assert "ECG stream stop failed: INVALID STATE" in capture.capture_errors
+
+    def test_notification_stop_exception_is_recorded(self, monkeypatch):
+        monkeypatch.setattr(validation, "MIN_CAPTURE_SECONDS", 0.01)
+
+        class StopFailureHeartRate(FakeHeartRate):
+            async def stop_notify(self):
+                raise RuntimeError("notification stuck")
+
+        capture = asyncio.run(
+            capture_live(
+                duration_s=0.06,
+                scanner=FakeScanner,
+                client_factory=FakeClient,
+                pmd_factory=FakePMD,
+                hr_factory=StopFailureHeartRate,
+            )
+        )
+        assert capture.hr_notify_stop_succeeded is False
+        assert "heart-rate notification stop failed: notification stuck" in capture.capture_errors
+
+    def test_stream_stop_and_disconnect_exceptions_are_recorded(self, monkeypatch):
+        monkeypatch.setattr(validation, "MIN_CAPTURE_SECONDS", 0.01)
+
+        class StopExceptionPMD(FakePMD):
+            async def stop_streaming(self, measurement):
+                raise RuntimeError("PMD stop timeout")
+
+        class ExitExceptionClient(FakeClient):
+            async def __aexit__(self, exc_type, exc, traceback):
+                raise RuntimeError("disconnect timeout")
+
+        capture = asyncio.run(
+            capture_live(
+                duration_s=0.06,
+                scanner=FakeScanner,
+                client_factory=ExitExceptionClient,
+                pmd_factory=StopExceptionPMD,
+                hr_factory=FakeHeartRate,
+            )
+        )
+        assert "ECG stream stop failed: PMD stop timeout" in capture.capture_errors
+        assert "Bluetooth disconnect failed: disconnect timeout" in capture.capture_errors
+
+    def test_live_processing_exception_still_stops_both_streams(self, monkeypatch):
+        monkeypatch.setattr(validation, "MIN_CAPTURE_SECONDS", 0.01)
+
+        class BadPayloadPMD(FakePMD):
+            async def start_streaming(self, measurement):
+                await self.ecg_queue.put(("ECG", "bad-timestamp", [1, 2]))
+                return 0, "SUCCESS", b""
+
+        capture = asyncio.run(
+            capture_live(
+                duration_s=0.02,
+                scanner=FakeScanner,
+                client_factory=FakeClient,
+                pmd_factory=BadPayloadPMD,
+                hr_factory=FakeHeartRate,
+            )
+        )
+        assert any("live capture failed" in error for error in capture.capture_errors)
+        assert capture.stream_stop_succeeded is True
+        assert capture.hr_notify_stop_succeeded is True
+
+
+class TestDependencyAndCliPaths:
+    def test_missing_dependency_version_is_explicit(self, monkeypatch):
+        def missing(_distribution):
+            raise validation.importlib.metadata.PackageNotFoundError
+
+        monkeypatch.setattr(validation.importlib.metadata, "version", missing)
+        assert validation._version("missing") == "not-installed"
+
+    def test_cli_replay_mode(self, tmp_path):
+        source = tmp_path / "source"
+        capture = synthetic_capture()
+        write_artifacts(source, capture, validate_capture(capture))
+        output = tmp_path / "replay"
+        assert validation.main(["--replay", str(source), "--output", str(output)]) == 0
+        assert read_capture(output).provenance == "replay"
+
+    def test_cli_live_mode_and_failed_report_exit(self, tmp_path, monkeypatch):
+        async def passing_live(**kwargs):
+            capture = synthetic_capture()
+            capture.provenance = "live_hardware"
+            return capture
+
+        monkeypatch.setattr(validation, "capture_live", passing_live)
+        output = tmp_path / "live-pass"
+        assert validation.main(["--live", "--output", str(output)]) == 0
+
+        async def failing_live(**kwargs):
+            return Capture(
+                provenance="live_hardware",
+                requested_duration_s=15,
+                started_at_utc="now",
+                device_name="H10",
+                device_identifier="device",
+            )
+
+        monkeypatch.setattr(validation, "capture_live", failing_live)
+        assert validation.main([
+            "--live", "--output", str(tmp_path / "live-fail")
+        ]) == 1
+
+    def test_cli_invalid_duration_bad_replay_and_existing_output_exit_two(
+        self, tmp_path, capsys
+    ):
+        assert validation.main(["--self-test", "--duration", "1"]) == 2
+        malformed = tmp_path / "bad.json"
+        malformed.write_text("not-json")
+        assert validation.main(["--replay", str(malformed)]) == 2
+        existing = tmp_path / "existing"
+        existing.mkdir()
+        assert validation.main(["--self-test", "--output", str(existing)]) == 2
+        assert '"passed": false' in capsys.readouterr().err.lower()
+
+    def test_cli_requires_exactly_one_mode(self):
+        with pytest.raises(SystemExit) as exc:
+            validation.main([])
+        assert exc.value.code == 2
+
+    def test_default_output_directory_contains_prefix(self):
+        assert validation.default_output_dir("polar-test").name.startswith("polar-test-")
