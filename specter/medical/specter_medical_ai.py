@@ -652,15 +652,43 @@ class ECGAnalysisCache:
             for key, value in sorted(relevant_metadata.items()):
                 lines.append(f"    - {key}: {value}")
         machine = payload.get("machine_output", {})
+        source_device = str(
+            machine.get("source_device")
+            or payload.get("source", {}).get("device")
+            or "source device"
+        )
+        source_format = str(
+            machine.get("source_format")
+            or payload.get("source", {}).get("format")
+            or "unknown format"
+        )
         measurements = machine.get("measurements", {})
         if measurements:
-            lines.append("  Biocare machine measurements (unverified device output):")
+            lines.append(
+                f"  {source_device} measurements "
+                f"(unverified device output; source format {source_format}):"
+            )
             for key, value in sorted(measurements.items()):
                 lines.append(f"    - {key}: {value}")
         interpretations = machine.get("interpretation", [])
         if interpretations:
-            lines.append("  Biocare machine interpretation (unverified; must review tracing):")
+            lines.append(
+                f"  {source_device} interpretation "
+                "(unverified; must review the original tracing):"
+            )
             lines.extend(f"    - {item}" for item in interpretations)
+        data_layers = payload.get("data_layers", {})
+        if data_layers:
+            lines.append("  Data-layer attribution:")
+            for layer_name in (
+                "raw_source", "device_generated", "specter_derived",
+                "research_models", "medgemma_context",
+            ):
+                layer = data_layers.get(layer_name)
+                if isinstance(layer, dict):
+                    lines.append(
+                        f"    - {layer_name}: {layer.get('status', 'unknown')}"
+                    )
         deterministic = payload.get("deterministic_measurements", {})
         if deterministic:
             lines.append(

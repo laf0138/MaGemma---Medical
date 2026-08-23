@@ -203,7 +203,7 @@ def security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if request.path in {"/", "/resus", "/ward", "/login"} or request.path.startswith("/api/"):
+    if request.path in {"/", "/resus", "/ward", "/ecg", "/login"} or request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -281,6 +281,16 @@ def ward():
     if html_path.exists():
         return html_path.read_text()
     return "<h1>SPECTER WARD</h1><p>ward.html not found.</p>", 404
+
+
+@app.route("/ecg")
+@login_required
+def ecg():
+    """Serve the structured 12-lead research-analysis review screen."""
+    html_path = DASHBOARD_DIR / "ecg.html"
+    if html_path.exists():
+        return html_path.read_text()
+    return "<h1>SPECTER ECG</h1><p>ecg.html not found.</p>", 404
 
 
 @app.route("/dashboard/vendor/<path:filename>")

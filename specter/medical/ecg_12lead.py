@@ -2,8 +2,10 @@
 """Canonical, loss-aware 12-lead ECG ingestion for SPECTER.
 
 The Biocare iE300 can export XML and DICOM, but its public documentation does
-not define the XML element schema.  This module therefore accepts only an
-explicit, inspectable subset of XML structures and fails closed on ambiguity.
+not define the XML element schema.  This module therefore keeps the vendor
+profile disabled and labels its inspectable fallback as strict generic XML.
+It also provides separate HL7 aECG and public WFDB adapters. All fail closed on
+ambiguity.
 The untouched source file is always retained by :func:`archive_record`; model
 input is a derived artifact with a complete transformation log.
 
@@ -14,12 +16,14 @@ waveform data for separately versioned research models.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -47,6 +51,9 @@ _DATA_TAGS = {"samples", "sampledata", "digits", "waveformdata", "waveform", "da
 _LEAD_TAGS = {"lead", "channel", "waveformchannel", "leadwaveform"}
 _MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _MAX_XML_ELEMENTS = 50_000
+MIN_SOURCE_SAMPLE_RATE_HZ = 100
+MAX_SOURCE_SAMPLE_RATE_HZ = 8_000
+HL7_V3_NAMESPACE = "urn:hl7-org:v3"
 
 
 class ECGImportError(ValueError):
@@ -75,6 +82,16 @@ def _parse_float(value: Any, label: str) -> float:
     if not math.isfinite(result):
         raise ECGImportError(f"non-finite {label}")
     return result
+
+
+def _validate_source_sample_rate(value: Any) -> float:
+    sample_rate = _parse_float(value, "sample rate")
+    if not MIN_SOURCE_SAMPLE_RATE_HZ <= sample_rate <= MAX_SOURCE_SAMPLE_RATE_HZ:
+        raise ECGImportError(
+            f"sample rate must be between {MIN_SOURCE_SAMPLE_RATE_HZ} and "
+            f"{MAX_SOURCE_SAMPLE_RATE_HZ} Hz"
+        )
+    return sample_rate
 
 
 def _parse_timestamp(value: str | None) -> str:
@@ -138,8 +155,8 @@ class CanonicalECG:
     signals_mv: np.ndarray
     source_name: str
     source_sha256: str
-    source_format: str = "biocare-xml"
-    source_device: str = "Biocare iE300"
+    source_format: str = "strict-generic-xml-v1"
+    source_device: str = "unspecified ECG source"
     metadata: dict[str, Any] = field(default_factory=dict)
     machine_measurements: dict[str, Any] = field(default_factory=dict)
     machine_interpretation: list[str] = field(default_factory=list)
@@ -184,8 +201,11 @@ class CanonicalECG:
                 issues.append(f"{lead}: amplitude exceeds 20 mV")
             if clipped:
                 issues.append(f"{lead}: possible clipping/quantization")
-        if not 100 <= self.sample_rate_hz <= 2000:
-            issues.append("sample rate outside supported 100-2000 Hz range")
+        if not MIN_SOURCE_SAMPLE_RATE_HZ <= self.sample_rate_hz <= MAX_SOURCE_SAMPLE_RATE_HZ:
+            issues.append(
+                "sample rate outside supported "
+                f"{MIN_SOURCE_SAMPLE_RATE_HZ}-{MAX_SOURCE_SAMPLE_RATE_HZ} Hz source range"
+            )
         if self.duration_seconds < 8:
             issues.append("recording shorter than 8 seconds")
         if self.duration_seconds > 300:
@@ -225,7 +245,11 @@ class CanonicalECG:
             "transformations": self.transformations,
             "quality": self.quality_report(),
             "raw_data_usage": {
-                "source_bytes": "archived_unchanged",
+                "source_bytes": (
+                    "exact_companion_files_archived_losslessly_in_deterministic_zip"
+                    if self.source_format == "wfdb-bundle"
+                    else "archived_unchanged"
+                ),
                 "all_12_waveform_leads": (
                     "preserved in full in waveform.npz; each model receives all leads "
                     "with its registered crop/pad/resample transformation"
@@ -239,12 +263,12 @@ class CanonicalECG:
         }
 
 
-class BiocareXMLImporter:
-    """Conservative importer for exported Biocare XML.
+class StrictGenericXMLImporter:
+    """Conservative fallback for an explicitly inspectable XML subset.
 
     A real iE300 XML sample must still be captured during hardware validation.
-    Until then, unsupported or ambiguous vendor structures are rejected instead
-    of being guessed from tag position.
+    This adapter is not represented as vendor-compatible. Unsupported or
+    ambiguous structures are rejected instead of being guessed from position.
     """
 
     def load(self, source: str | Path | bytes) -> tuple[CanonicalECG, bytes]:
@@ -306,9 +330,7 @@ class BiocareXMLImporter:
             (value for name in _SAMPLE_RATE_NAMES for value in values.get(name, [])),
             "sample rate",
         )
-        sample_rate = _parse_float(sample_rate_text, "sample rate")
-        if not 100 <= sample_rate <= 2000:
-            raise ECGImportError("sample rate must be between 100 and 2000 Hz")
+        sample_rate = _validate_source_sample_rate(sample_rate_text)
         unit = _first_unique(
             (value for name in _UNIT_NAMES for value in values.get(name, [])),
             "amplitude unit",
@@ -429,6 +451,441 @@ class BiocareXMLImporter:
                 if text and text not in result:
                     result.append(text)
         return result
+
+
+# Compatibility import for earlier SPECTER callers. The implementation is and
+# remains a strict generic adapter; the alias does not assert Biocare schema
+# compatibility.
+BiocareXMLImporter = StrictGenericXMLImporter
+
+
+def _read_bounded_xml(source: str | Path | bytes) -> tuple[bytes, str, ET.Element, list[ET.Element]]:
+    if isinstance(source, bytes):
+        raw = source
+        source_name = "memory.xml"
+    else:
+        path = Path(source)
+        raw = path.read_bytes()
+        source_name = path.name
+    if not raw or len(raw) > _MAX_SOURCE_BYTES:
+        raise ECGImportError("XML source is empty or exceeds 64 MiB")
+    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise ECGImportError("DTD/entity declarations are not accepted")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ECGImportError("invalid XML source") from exc
+    elements = list(root.iter())
+    if len(elements) > _MAX_XML_ELEMENTS:
+        raise ECGImportError("XML contains too many elements")
+    return raw, source_name, root, elements
+
+
+def _parse_hl7_timestamp(value: str) -> str:
+    """Parse an HL7 TS while refusing to invent a missing time zone."""
+    match = re.fullmatch(
+        r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
+        r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
+        r"(?P<fraction>\.\d+)?(?P<zone>Z|[+-]\d{4})?",
+        value.strip(),
+    )
+    if not match or not match.group("zone"):
+        raise ECGImportError("HL7 acquisition timestamp must include a time zone")
+    fraction = match.group("fraction") or ""
+    microsecond = int((fraction[1:] + "000000")[:6]) if fraction else 0
+    zone = match.group("zone")
+    zone_text = "+00:00" if zone == "Z" else f"{zone[:3]}:{zone[3:]}"
+    try:
+        parsed = datetime.fromisoformat(
+            f"{match.group('year')}-{match.group('month')}-{match.group('day')}T"
+            f"{match.group('hour')}:{match.group('minute')}:{match.group('second')}"
+            f".{microsecond:06d}{zone_text}"
+        )
+    except ValueError as exc:
+        raise ECGImportError("invalid HL7 acquisition timestamp") from exc
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _descendants(element: ET.Element, local_name: str) -> list[ET.Element]:
+    return [item for item in element.iter() if _local_name(item.tag) == local_name]
+
+
+class HL7AECGImporter:
+    """Strict waveform importer for the published HL7 v3 annotated-ECG shape.
+
+    This is deliberately a separate profile.  Supporting HL7 aECG does not
+    imply that a Biocare export uses HL7 aECG.
+    """
+
+    _TIME_CODES = {"TIME_ABSOLUTE", "TIME_RELATIVE"}
+
+    def load(self, source: str | Path | bytes) -> tuple[CanonicalECG, bytes]:
+        raw, source_name, root, elements = _read_bounded_xml(source)
+        if _local_name(root.tag) != "AnnotatedECG" or not root.tag.startswith(
+            "{" + HL7_V3_NAMESPACE + "}"
+        ):
+            raise ECGImportError("source is not an HL7 v3 AnnotatedECG document")
+
+        sample_rates: list[float] = []
+        sequences = _descendants(root, "sequence")
+        for sequence in sequences:
+            codes = [item.get("code", "") for item in list(sequence) if _local_name(item.tag) == "code"]
+            if not codes or codes[0] not in self._TIME_CODES:
+                continue
+            increments = _descendants(sequence, "increment")
+            if len(increments) != 1:
+                raise ECGImportError("HL7 aECG time sequence must contain one increment")
+            increment = _parse_float(increments[0].get("value"), "HL7 time increment")
+            unit = str(increments[0].get("unit", "")).strip().replace("µ", "u").lower()
+            seconds_per_unit = {"s": 1.0, "ms": 0.001, "us": 0.000001}.get(unit)
+            if seconds_per_unit is None or increment <= 0:
+                raise ECGImportError("HL7 time increment requires a positive s, ms, or us unit")
+            sample_rates.append(1.0 / (increment * seconds_per_unit))
+        sample_rate_text = _first_unique(
+            (f"{value:.12g}" for value in sample_rates), "HL7 sample rate"
+        )
+        sample_rate = _validate_source_sample_rate(sample_rate_text)
+
+        leads: dict[str, np.ndarray] = {}
+        scale_provenance: dict[str, dict[str, Any]] = {}
+        for sequence in sequences:
+            codes = [item.get("code", "") for item in list(sequence) if _local_name(item.tag) == "code"]
+            if not codes or not codes[0].startswith("MDC_ECG_LEAD_"):
+                continue
+            lead = _lead_name(codes[0].removeprefix("MDC_ECG_LEAD_"))
+            if lead is None:
+                continue
+            if lead in leads:
+                raise ECGImportError(f"duplicate HL7 aECG lead {lead}")
+            origins = _descendants(sequence, "origin")
+            scales = _descendants(sequence, "scale")
+            digits_nodes = _descendants(sequence, "digits")
+            if len(origins) != 1 or len(scales) != 1 or len(digits_nodes) != 1:
+                raise ECGImportError(
+                    f"HL7 aECG lead {lead} requires one origin, scale, and digits sequence"
+                )
+            origin = _parse_float(origins[0].get("value"), f"{lead} origin")
+            scale = _parse_float(scales[0].get("value"), f"{lead} scale")
+            if scale == 0:
+                raise ECGImportError(f"HL7 aECG lead {lead} scale must be non-zero")
+            origin_unit = str(origins[0].get("unit", ""))
+            scale_unit = str(scales[0].get("unit", ""))
+            origin_mv = origin * _unit_multiplier_to_mv(origin_unit)
+            scale_mv = scale * _unit_multiplier_to_mv(scale_unit)
+            digits = _numeric_samples(digits_nodes[0].text or "", lead)
+            leads[lead] = origin_mv + digits * scale_mv
+            scale_provenance[lead] = {
+                "origin": origin,
+                "origin_unit": origin_unit,
+                "scale": scale,
+                "scale_unit": scale_unit,
+                "formula": "origin_mV + digit * scale_mV",
+            }
+
+        missing = [lead for lead in CANONICAL_LEADS if lead not in leads]
+        if missing:
+            raise ECGImportError(f"missing canonical leads: {', '.join(missing)}")
+        lengths = {samples.size for samples in leads.values()}
+        if len(lengths) != 1:
+            raise ECGImportError("all leads must contain the same sample count")
+
+        series_nodes = _descendants(root, "series")
+        timestamps: list[str] = []
+        for series in series_nodes:
+            for child in list(series):
+                if _local_name(child.tag) != "effectiveTime":
+                    continue
+                lows = [item for item in list(child) if _local_name(item.tag) == "low"]
+                timestamps.extend(item.get("value", "") for item in lows if item.get("value"))
+        acquired = _parse_hl7_timestamp(_first_unique(timestamps, "HL7 acquisition timestamp") or "")
+
+        patient_ids: list[str] = []
+        for subject in _descendants(root, "trialSubject"):
+            ids = [item for item in list(subject) if _local_name(item.tag) == "id"]
+            patient_ids.extend(item.get("extension") or item.get("root") or "" for item in ids)
+        patient_id = _first_unique(patient_ids, "HL7 patient ID")
+        root_ids = [item for item in list(root) if _local_name(item.tag) == "id"]
+        study_id = _first_unique(
+            (item.get("extension") or item.get("root") or "" for item in root_ids),
+            "HL7 ECG ID",
+        )
+        device_names = [
+            (item.text or "").strip()
+            for item in _descendants(root, "manufacturerModelName")
+            if (item.text or "").strip()
+        ]
+        source_device = _first_unique(device_names, "HL7 device model", required=False) or "unspecified HL7 aECG device"
+        signals = np.stack([leads[lead] for lead in CANONICAL_LEADS])
+        record = CanonicalECG(
+            patient_id=patient_id or "",
+            study_id=study_id or "",
+            acquired_at_utc=acquired,
+            sample_rate_hz=sample_rate,
+            signals_mv=signals,
+            source_name=source_name,
+            source_sha256=hashlib.sha256(raw).hexdigest(),
+            source_format="hl7-aecg-r1",
+            source_device=source_device,
+            metadata={
+                "standard": "HL7 v3 Regulated Studies Annotated ECG Release 1",
+                "namespace": HL7_V3_NAMESPACE,
+                "schema_location": next(
+                    (
+                        value
+                        for key, value in root.attrib.items()
+                        if _local_name(key) == "schemaLocation"
+                    ),
+                    None,
+                ),
+            },
+            transformations=[{
+                "operation": "hl7_slist_physical_value_conversion",
+                "per_lead": scale_provenance,
+                "target_unit": "mV",
+            }],
+        )
+        quality = record.quality_report()
+        if quality["status"] != "pass":
+            raise ECGImportError("waveform quality gate failed: " + "; ".join(quality["issues"]))
+        return record, raw
+
+
+@dataclass
+class WFDBSignalRecord:
+    """Loss-aware physical signals from any public WFDB record.
+
+    A two-channel MIT-BIH record is valid here but cannot be promoted to a
+    diagnostic 12-lead :class:`CanonicalECG`.
+    """
+
+    record_name: str
+    sample_rate_hz: float
+    signal_names: tuple[str, ...]
+    signals_mv: np.ndarray
+    source_bundle: bytes
+    source_sha256: str
+    metadata: dict[str, Any]
+
+    def as_canonical_12lead(
+        self,
+        *,
+        patient_id: str,
+        study_id: str,
+        acquired_at_utc: str,
+        source_device: str,
+    ) -> CanonicalECG:
+        mapped: dict[str, np.ndarray] = {}
+        for index, name in enumerate(self.signal_names):
+            lead = _lead_name(name)
+            if lead is None:
+                continue
+            if lead in mapped:
+                raise ECGImportError(f"duplicate WFDB lead {lead}")
+            mapped[lead] = self.signals_mv[index]
+        missing = [lead for lead in CANONICAL_LEADS if lead not in mapped]
+        if missing:
+            raise ECGImportError(
+                "WFDB record is not a complete diagnostic 12-lead record; missing: "
+                + ", ".join(missing)
+            )
+        record = CanonicalECG(
+            patient_id=patient_id,
+            study_id=study_id,
+            acquired_at_utc=_parse_timestamp(acquired_at_utc),
+            sample_rate_hz=self.sample_rate_hz,
+            signals_mv=np.stack([mapped[lead] for lead in CANONICAL_LEADS]),
+            source_name=f"{self.record_name}.wfdb.zip",
+            source_sha256=self.source_sha256,
+            source_format="wfdb-bundle",
+            source_device=source_device,
+            metadata=self.metadata,
+            transformations=[{
+                "operation": "wfdb_physical_signal_conversion",
+                "source_units": self.metadata.get("source_units"),
+                "target_unit": "mV",
+                "calibration": "applied by pinned wfdb reader from header gain/baseline",
+            }],
+        )
+        quality = record.quality_report()
+        if quality["status"] != "pass":
+            raise ECGImportError("waveform quality gate failed: " + "; ".join(quality["issues"]))
+        return record
+
+
+class WFDBImporter:
+    """Read public PhysioNet/WFDB records without treating them as device XML."""
+
+    MAX_RECORD_FILES = 32
+
+    @staticmethod
+    def _bundle(record_base: Path) -> tuple[bytes, list[dict[str, Any]]]:
+        files = sorted(path for path in record_base.parent.glob(record_base.name + ".*") if path.is_file())
+        if not files or not record_base.with_suffix(".hea").is_file():
+            raise ECGImportError("WFDB header and signal files are required")
+        if len(files) > WFDBImporter.MAX_RECORD_FILES:
+            raise ECGImportError("WFDB record contains too many companion files")
+        total = sum(path.stat().st_size for path in files)
+        if total > _MAX_SOURCE_BYTES:
+            raise ECGImportError("WFDB source bundle exceeds 64 MiB")
+        manifest: list[dict[str, Any]] = []
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for path in files:
+                data = path.read_bytes()
+                manifest.append({
+                    "name": path.name,
+                    "size": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                })
+                info = zipfile.ZipInfo(path.name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, data)
+        return output.getvalue(), manifest
+
+    def load_signal_record(
+        self,
+        source: str | Path,
+        *,
+        dataset_id: str,
+        dataset_version: str,
+        dataset_license: str,
+    ) -> WFDBSignalRecord:
+        try:
+            import wfdb
+        except ImportError as exc:
+            raise ECGImportError("wfdb dependency is required for public ECG records") from exc
+        path = Path(source).resolve()
+        record_base = path.with_suffix("") if path.suffix == ".hea" else path
+        bundle, files = self._bundle(record_base)
+        try:
+            loaded = wfdb.rdrecord(str(record_base), physical=True, return_res=64)
+        except Exception as exc:
+            raise ECGImportError(f"WFDB record cannot be decoded: {exc}") from exc
+        signals = np.asarray(loaded.p_signal, dtype=np.float64)
+        if signals.ndim != 2 or signals.shape[0] < 1 or signals.shape[1] < 1:
+            raise ECGImportError("WFDB record contains no physical signals")
+        if not np.isfinite(signals).all():
+            raise ECGImportError("WFDB record contains NaN or infinite physical samples")
+        names = tuple(str(value) for value in loaded.sig_name)
+        units = tuple(str(value) for value in loaded.units)
+        if len(names) != signals.shape[1] or len(units) != signals.shape[1]:
+            raise ECGImportError("WFDB signal metadata does not match channel count")
+        normalized = []
+        for index, unit in enumerate(units):
+            normalized.append(signals[:, index] * _unit_multiplier_to_mv(unit))
+        sample_rate = _validate_source_sample_rate(loaded.fs)
+        metadata = {
+            "dataset_id": dataset_id,
+            "dataset_version": dataset_version,
+            "dataset_license": dataset_license,
+            "wfdb_record_name": str(getattr(loaded, "record_name", record_base.name)),
+            "source_files": files,
+            "source_units": list(units),
+            "signal_names": list(names),
+            "comments": [str(value) for value in getattr(loaded, "comments", [])],
+            "adc_gain": [
+                None if value is None else float(value)
+                for value in (getattr(loaded, "adc_gain", None) or [])
+            ],
+            "baseline": [
+                None if value is None else int(value)
+                for value in (getattr(loaded, "baseline", None) or [])
+            ],
+        }
+        return WFDBSignalRecord(
+            record_name=record_base.name,
+            sample_rate_hz=sample_rate,
+            signal_names=names,
+            signals_mv=np.stack(normalized),
+            source_bundle=bundle,
+            source_sha256=hashlib.sha256(bundle).hexdigest(),
+            metadata=metadata,
+        )
+
+    def load(
+        self,
+        source: str | Path,
+        *,
+        patient_id: str,
+        study_id: str,
+        acquired_at_utc: str,
+        source_device: str,
+        dataset_id: str,
+        dataset_version: str,
+        dataset_license: str,
+    ) -> tuple[CanonicalECG, bytes]:
+        public = self.load_signal_record(
+            source,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            dataset_license=dataset_license,
+        )
+        return (
+            public.as_canonical_12lead(
+                patient_id=patient_id,
+                study_id=study_id,
+                acquired_at_utc=acquired_at_utc,
+                source_device=source_device,
+            ),
+            public.source_bundle,
+        )
+
+
+def export_specter_synthetic_xml(
+    record: CanonicalECG,
+    *,
+    labels: Iterable[str] = (),
+) -> bytes:
+    """Create a plumbing fixture that is explicitly *not* vendor XML."""
+    root = ET.Element(
+        "SPECTERSyntheticECG",
+        {"schemaVersion": "1", "vendorCompatibility": "none"},
+    )
+    ET.SubElement(root, "SyntheticNotice").text = (
+        "Generated from a canonical public/test waveform; not a Biocare export"
+    )
+    ET.SubElement(root, "PatientID").text = record.patient_id
+    ET.SubElement(root, "StudyID").text = record.study_id
+    ET.SubElement(root, "AcquisitionDateTime").text = record.acquired_at_utc
+    ET.SubElement(root, "SampleRate").text = f"{record.sample_rate_hz:.12g}"
+    ET.SubElement(root, "AmplitudeUnit").text = "mV"
+    ET.SubElement(root, "Gain").text = "1"
+    provenance = ET.SubElement(root, "SourceProvenance")
+    ET.SubElement(provenance, "SourceFormat").text = record.source_format
+    ET.SubElement(provenance, "SourceSHA256").text = record.source_sha256
+    ET.SubElement(provenance, "DatasetID").text = str(record.metadata.get("dataset_id", "unspecified"))
+    label_node = ET.SubElement(root, "ReferenceLabels")
+    for label in labels:
+        ET.SubElement(label_node, "Label").text = str(label)
+    waveforms = ET.SubElement(root, "Waveforms")
+    for index, lead in enumerate(CANONICAL_LEADS):
+        lead_node = ET.SubElement(waveforms, "Lead", {"name": lead})
+        ET.SubElement(lead_node, "Samples").text = " ".join(
+            f"{value:.9g}" for value in record.signals_mv[index]
+        )
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+class XML12LeadImporter:
+    """Dispatch strict XML inputs without conflating standards and vendors."""
+
+    def load(self, source: str | Path | bytes) -> tuple[CanonicalECG, bytes]:
+        _raw, _source_name, root, _elements = _read_bounded_xml(source)
+        if _local_name(root.tag) == "AnnotatedECG":
+            return HL7AECGImporter().load(source)
+        record, imported = StrictGenericXMLImporter().load(source)
+        if _local_name(root.tag) == "SPECTERSyntheticECG":
+            if root.get("vendorCompatibility") != "none":
+                raise ECGImportError("synthetic XML must deny vendor compatibility")
+            record.source_format = "specter-synthetic-xml-v1"
+            record.source_device = "SPECTER public-data fixture"
+            record.transformations.insert(0, {
+                "operation": "synthetic_fixture_import",
+                "clinical_use": "software plumbing and regression tests only",
+                "vendor_compatibility": "none",
+            })
+        return record, imported
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

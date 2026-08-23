@@ -414,6 +414,15 @@ class TestHttpRoutes:
         assert resp.status_code == 200
         assert b"<html" in resp.data.lower()
 
+    def test_ecg_route_serves_attributed_research_screen(self, client):
+        login(client)
+        resp = client.get("/ecg")
+        assert resp.status_code == 200
+        assert b"<html" in resp.data.lower()
+        assert b"research decision support" in resp.data.lower()
+        assert b"device-generated" in resp.data.lower()
+        assert b"medgemma" in resp.data.lower()
+
     def test_api_state_returns_current_state(self, client):
         login(client)
         ds.STATE["tx"]["status"] = "idle-test-marker"

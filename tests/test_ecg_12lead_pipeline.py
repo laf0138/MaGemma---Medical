@@ -1,8 +1,11 @@
 import hashlib
+import io
 import json
 import math
 import sys
 import subprocess
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +17,12 @@ from medical.ecg_12lead import (
     BiocareXMLImporter,
     CanonicalECG,
     ECGImportError,
+    HL7AECGImporter,
+    MAX_SOURCE_SAMPLE_RATE_HZ,
+    WFDBImporter,
+    XML12LeadImporter,
     archive_record,
+    export_specter_synthetic_xml,
     prepare_model_input,
 )
 from medical.ecg_models import (
@@ -59,6 +67,45 @@ def xml_bytes(*, sample_rate=500, unit="uV", gain=1, seconds=10, omit=None, samp
 </BiocareECG>""").encode()
 
 
+def aecg_bytes(*, sample_rate=500, seconds=10, omit=None, increment_unit="ms", timestamp="20260822103000.000-0600"):
+    namespace = "urn:hl7-org:v3"
+    xsi = "http://www.w3.org/2001/XMLSchema-instance"
+    ET.register_namespace("", namespace)
+    ET.register_namespace("xsi", xsi)
+    q = lambda name: f"{{{namespace}}}{name}"
+    root = ET.Element(q("AnnotatedECG"), {f"{{{xsi}}}schemaLocation": f"{namespace} aecg.xsd"})
+    ET.SubElement(root, q("id"), {"root": "2.16.840.1.113883.999.1"})
+    subject = ET.SubElement(root, q("trialSubject"))
+    ET.SubElement(subject, q("id"), {"extension": "public-patient-1"})
+    series = ET.SubElement(ET.SubElement(root, q("component")), q("series"))
+    effective = ET.SubElement(series, q("effectiveTime"))
+    ET.SubElement(effective, q("low"), {"value": timestamp})
+    author = ET.SubElement(series, q("seriesAuthor"))
+    ET.SubElement(author, q("manufacturerModelName")).text = "Public reference recorder"
+    sequence_set = ET.SubElement(ET.SubElement(series, q("component")), q("sequenceSet"))
+    time_sequence = ET.SubElement(ET.SubElement(sequence_set, q("component")), q("sequence"))
+    ET.SubElement(time_sequence, q("code"), {"code": "TIME_RELATIVE"})
+    time_value = ET.SubElement(time_sequence, q("value"), {f"{{{xsi}}}type": "GLIST_TS"})
+    ET.SubElement(
+        time_value,
+        q("increment"),
+        {"value": f"{1000 / sample_rate:.12g}", "unit": increment_unit},
+    )
+    base = waveform(sample_rate, seconds) * 1000
+    for index, lead in enumerate(CANONICAL_LEADS):
+        if lead == omit:
+            continue
+        sequence = ET.SubElement(ET.SubElement(sequence_set, q("component")), q("sequence"))
+        ET.SubElement(sequence, q("code"), {"code": f"MDC_ECG_LEAD_{lead.upper()}"})
+        value = ET.SubElement(sequence, q("value"), {f"{{{xsi}}}type": "SLIST_PQ"})
+        ET.SubElement(value, q("origin"), {"value": "0", "unit": "uV"})
+        ET.SubElement(value, q("scale"), {"value": "1", "unit": "uV"})
+        ET.SubElement(value, q("digits")).text = " ".join(
+            f"{sample + index * 0.01:.7f}" for sample in base
+        )
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
 def record():
     raw = xml_bytes()
     return BiocareXMLImporter().load(raw)[0]
@@ -69,6 +116,8 @@ def test_biocare_import_preserves_all_leads_metadata_and_machine_output():
     assert raw == xml_bytes()
     assert parsed.signals_mv.shape == (12, 5000)
     assert parsed.patient_id == "patient-1"
+    assert parsed.source_format == "strict-generic-xml-v1"
+    assert parsed.source_device == "unspecified ECG source"
     assert parsed.acquired_at_utc == "2026-08-22T16:30:00Z"
     assert parsed.machine_measurements == {
         "HeartRate": {"value": "61", "attributes": {"unit": "bpm"}},
@@ -106,6 +155,143 @@ def test_biocare_import_rejects_nonfinite_and_ambiguous_fields():
     raw = xml_bytes().replace(b"<SampleRate>500</SampleRate>", b"<SampleRate>500</SampleRate><SamplingRate>250</SamplingRate>")
     with pytest.raises(ECGImportError, match="ambiguous sample rate"):
         BiocareXMLImporter().load(raw)
+
+
+def test_source_profile_preserves_explicit_8000_hz_without_claiming_export_rate():
+    sample_rate = MAX_SOURCE_SAMPLE_RATE_HZ
+    signal = waveform(sample_rate, 8)
+    parsed = CanonicalECG(
+        patient_id="public-patient",
+        study_id="public-study",
+        acquired_at_utc="2026-08-22T16:30:00Z",
+        sample_rate_hz=sample_rate,
+        signals_mv=np.stack([signal + index * 0.001 for index in range(12)]),
+        source_name="public.dat",
+        source_sha256="a" * 64,
+        source_format="test",
+        source_device="reference recorder",
+    )
+    assert parsed.quality_report()["status"] == "pass"
+    model_input, provenance = prepare_model_input(parsed, sample_rate_hz=500, sample_count=4000)
+    assert model_input.shape == (12, 4000)
+    assert provenance["source_sample_rate_hz"] == 8000
+    assert provenance["resampling"] == "polyphase_FIR_with_antialiasing"
+
+
+def test_hl7_aecg_import_is_namespace_aware_and_applies_declared_scale():
+    parsed, raw = HL7AECGImporter().load(aecg_bytes())
+    assert raw == aecg_bytes()
+    assert parsed.source_format == "hl7-aecg-r1"
+    assert parsed.source_device == "Public reference recorder"
+    assert parsed.patient_id == "public-patient-1"
+    assert parsed.study_id == "2.16.840.1.113883.999.1"
+    assert parsed.sample_rate_hz == 500
+    assert parsed.signals_mv.shape == (12, 5000)
+    np.testing.assert_allclose(parsed.signals_mv[0, :10], waveform()[:10], atol=1e-6)
+    dispatched, _ = XML12LeadImporter().load(raw)
+    assert dispatched.source_format == "hl7-aecg-r1"
+
+
+@pytest.mark.parametrize(
+    "raw,match",
+    [
+        (aecg_bytes(omit="V6"), "missing canonical leads"),
+        (aecg_bytes(increment_unit=""), "positive s, ms, or us"),
+        (aecg_bytes(timestamp="20260822103000.000"), "include a time zone"),
+        (b'<!DOCTYPE x [<!ENTITY y "x">]><AnnotatedECG/>', "DTD/entity"),
+    ],
+)
+def test_hl7_aecg_fails_closed_without_required_semantics(raw, match):
+    with pytest.raises(ECGImportError, match=match):
+        HL7AECGImporter().load(raw)
+
+
+def _write_wfdb_record(tmp_path, name="public12", leads=CANONICAL_LEADS):
+    import wfdb
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    signals = np.stack(
+        [waveform() + index * 0.001 for index, _lead in enumerate(leads)], axis=1
+    )
+    wfdb.wrsamp(
+        name,
+        fs=500,
+        units=["mV"] * len(leads),
+        sig_name=list(leads),
+        p_signal=signals,
+        fmt=["16"] * len(leads),
+        comments=["de-identified public test fixture"],
+        write_dir=str(tmp_path),
+    )
+    return tmp_path / name
+
+
+def test_wfdb_import_preserves_exact_companion_files_and_promotes_only_12_lead(tmp_path):
+    source = _write_wfdb_record(tmp_path)
+    importer = WFDBImporter()
+    public = importer.load_signal_record(
+        source,
+        dataset_id="ptb-xl",
+        dataset_version="1.0.3",
+        dataset_license="ODbL 1.0",
+    )
+    assert public.signals_mv.shape == (12, 5000)
+    assert public.metadata["dataset_id"] == "ptb-xl"
+    with zipfile.ZipFile(io.BytesIO(public.source_bundle)) as archive:
+        assert set(archive.namelist()) == {"public12.hea", "public12.dat"}
+        assert archive.read("public12.hea") == (tmp_path / "public12.hea").read_bytes()
+        assert archive.read("public12.dat") == (tmp_path / "public12.dat").read_bytes()
+    record, bundle = importer.load(
+        source,
+        patient_id="ptb-patient-1",
+        study_id="ptb-record-1",
+        acquired_at_utc="2026-08-22T16:30:00Z",
+        source_device="PTB-XL reference recorder",
+        dataset_id="ptb-xl",
+        dataset_version="1.0.3",
+        dataset_license="ODbL 1.0",
+    )
+    assert bundle == public.source_bundle
+    assert record.source_format == "wfdb-bundle"
+    assert record.metadata["source_files"][0]["sha256"]
+
+    two_lead = _write_wfdb_record(tmp_path, name="mitlike", leads=("MLII", "V5"))
+    generic = importer.load_signal_record(
+        two_lead,
+        dataset_id="mit-bih",
+        dataset_version="1.0.0",
+        dataset_license="ODC-By 1.0",
+    )
+    assert generic.signals_mv.shape == (2, 5000)
+    with pytest.raises(ECGImportError, match="not a complete diagnostic 12-lead"):
+        generic.as_canonical_12lead(
+            patient_id="mit-patient",
+            study_id="mit-record",
+            acquired_at_utc="2026-08-22T16:30:00Z",
+            source_device="MIT-BIH reference recorder",
+        )
+
+
+def test_public_record_fixture_is_explicitly_non_vendor_and_round_trips(tmp_path):
+    source = _write_wfdb_record(tmp_path)
+    record, _ = WFDBImporter().load(
+        source,
+        patient_id="public-patient",
+        study_id="public-study",
+        acquired_at_utc="2026-08-22T16:30:00Z",
+        source_device="Public reference recorder",
+        dataset_id="ptb-xl",
+        dataset_version="1.0.3",
+        dataset_license="ODbL 1.0",
+    )
+    synthetic = export_specter_synthetic_xml(record, labels=["NORM"])
+    assert b'vendorCompatibility="none"' in synthetic
+    assert b"not a Biocare export" in synthetic
+    imported, raw = XML12LeadImporter().load(synthetic)
+    assert raw == synthetic
+    assert imported.source_format == "specter-synthetic-xml-v1"
+    assert imported.source_device == "SPECTER public-data fixture"
+    assert imported.transformations[0]["vendor_compatibility"] == "none"
 
 
 def test_archive_retains_exact_source_and_canonical_waveform(tmp_path):
@@ -296,6 +482,11 @@ def test_pipeline_archives_publishes_and_tracks_every_raw_data_consumer(tmp_path
     assert result["status"] == "models_unavailable"
     assert Path(result["source"]["archive"]["source"]).read_bytes() == source.read_bytes()
     assert result["raw_data_usage"]["antonior92"] == {"status": "not_used", "reason": "model disabled"}
+    assert result["source"]["format"] == "strict-generic-xml-v1"
+    assert result["data_layers"]["raw_source"]["status"] == "archived_unchanged"
+    assert result["data_layers"]["device_generated"]["status"] == "unverified_device_output"
+    assert result["data_layers"]["research_models"]["status"] == "unavailable"
+    assert result["data_layers"]["medgemma_context"]["waveform_samples_sent"] is False
     assert json.loads((Path(result["source"]["archive"]["root"]) / "analysis.json").read_text())["record_id"] == result["record_id"]
 
 
@@ -374,6 +565,31 @@ def test_ecg_cli_status_reports_disabled_registry_ready(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["models"][0]["enabled"] is False
 
 
+def test_ecg_cli_creates_only_explicit_nonvendor_fixture_from_wfdb(tmp_path, capsys):
+    config = pipeline_config(tmp_path)
+    config_path = tmp_path / "specter.json"
+    config_path.write_text(json.dumps(config))
+    source = _write_wfdb_record(tmp_path / "public")
+    output = tmp_path / "fixture.xml"
+    arguments = [
+        "--config", str(config_path), "make-synthetic-xml", str(source),
+        "--patient-id", "public-patient", "--study-id", "public-study",
+        "--acquired-at", "2026-08-22T16:30:00Z",
+        "--device", "Public reference recorder", "--dataset-id", "ptb-xl",
+        "--dataset-version", "1.0.3", "--dataset-license", "ODbL 1.0",
+        "--output", str(output), "--label", "AF",
+    ]
+    assert ecg_service_mod.main(arguments) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["vendor_compatibility"] == "none"
+    root = ET.fromstring(output.read_bytes())
+    assert root.tag == "SPECTERSyntheticECG"
+    assert root.get("vendorCompatibility") == "none"
+    assert root.findtext("SyntheticNotice").endswith("not a Biocare export")
+    assert root.findtext("ReferenceLabels/Label") == "AF"
+    assert ecg_service_mod.main(arguments) == 2
+
+
 def test_dataset_manifest_accepts_patient_isolation_and_rejects_leakage(tmp_path):
     manifest = tmp_path / "evaluation.json"
     dataset_root = tmp_path / "ptb-xl"; dataset_root.mkdir()
@@ -435,7 +651,18 @@ def analysis_payload():
     return {
         "schema_version": 1, "status": "complete", "record_id": "record-1", "patient_id": "p1",
         "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "quality": {"status": "pass", "issues": []},
-        "machine_output": {"measurements": {"HR": 61}, "interpretation": ["Sinus rhythm"]},
+        "source": {"device": "Public reference recorder", "format": "hl7-aecg"},
+        "machine_output": {
+            "source_device": "Public reference recorder", "source_format": "hl7-aecg",
+            "measurements": {"HR": 61}, "interpretation": ["Sinus rhythm"],
+        },
+        "data_layers": {
+            "raw_source": {"status": "archived_unchanged"},
+            "device_generated": {"status": "unverified_device_output"},
+            "specter_derived": {"status": "experimental_not_clinically_validated"},
+            "research_models": {"status": "complete"},
+            "medgemma_context": {"status": "structured_context_only"},
+        },
         "models": [{
             "model_id": "antonior92", "display_name": "AntonioR92", "version": "1", "status": "complete",
             "artifact_sha256": "a" * 64, "probabilities": {"AF": 0.1, "ST": 0.7}, "findings": ["ST"],
@@ -451,7 +678,11 @@ def test_medgemma_cache_rejects_mismatch_and_uses_complete_structured_output():
     assert cache.update("p1", analysis_payload())
     block = cache.to_prompt_block("p1")
     assert "AntonioR92" in block and "AF: probability 0.1000" in block
-    assert "ST: probability 0.7000" in block and "Biocare machine measurements" in block
+    assert "ST: probability 0.7000" in block
+    assert "Public reference recorder measurements" in block
+    assert "source format hl7-aecg" in block
+    assert "medgemma_context: structured_context_only" in block
+    assert "Biocare machine" not in block
     payload = cache.latest("p1"); payload["models"][0]["probabilities"]["AF"] = 1
     assert cache.latest("p1")["models"][0]["probabilities"]["AF"] == 0.1
     future = analysis_payload(); future["acquired_at_utc"] = "2099-01-01T00:00:00Z"

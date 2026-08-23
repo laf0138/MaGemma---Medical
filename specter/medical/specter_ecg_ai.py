@@ -23,9 +23,12 @@ from typing import Any, Mapping
 import paho.mqtt.client as mqtt
 
 from medical.ecg_12lead import (
-    BiocareXMLImporter,
+    CanonicalECG,
     ECGImportError,
+    WFDBImporter,
+    XML12LeadImporter,
     archive_record,
+    export_specter_synthetic_xml,
     experimental_lead_ii_measurements,
 )
 from medical.ecg_models import (
@@ -88,7 +91,7 @@ class ECGPipeline:
         self.max_file_age_seconds = max(60, int(ecg.get("max_file_age_seconds", 86_400)))
         self.registry = ModelRegistry.load(self.registry_path)
         self.runner = IsolatedModelRunner(self.registry, int(ecg.get("model_timeout_seconds", 120)))
-        self.importer = BiocareXMLImporter()
+        self.importer = XML12LeadImporter()
         self.mqtt = mqtt_client
         self._stop = threading.Event()
 
@@ -116,7 +119,6 @@ class ECGPipeline:
         digest = hashlib.sha256(raw).hexdigest()
         try:
             record, imported_raw = self.importer.load(source_path)
-            archived = archive_record(record, imported_raw, self.archive)
         except ECGImportError as exc:
             rejected = self._archive_rejected(source_path.name, raw, str(exc))
             result = {
@@ -130,6 +132,12 @@ class ECGPipeline:
             }
             self.publish_status(result)
             return result
+
+        return self.analyze_record(record, imported_raw)
+
+    def analyze_record(self, record: CanonicalECG, raw_source: bytes) -> dict[str, Any]:
+        """Archive and analyze one already validated canonical record."""
+        archived = archive_record(record, raw_source, self.archive)
 
         results = [self.runner.run(spec, record) for spec in self.registry.specs.values()]
         deterministic_measurements = experimental_lead_ii_measurements(record)
@@ -162,6 +170,8 @@ class ECGPipeline:
             "quality": record.quality_report(),
             "acquisition_metadata": record.metadata,
             "machine_output": {
+                "source_device": record.source_device,
+                "source_format": record.source_format,
                 "measurements": record.machine_measurements,
                 "interpretation": record.machine_interpretation,
                 "status": "unverified_device_output",
@@ -169,6 +179,39 @@ class ECGPipeline:
             "deterministic_measurements": deterministic_measurements,
             "models": [item.to_dict() for item in results],
             "agreement": agreement_report(results),
+            "data_layers": {
+                "raw_source": {
+                    "status": record.metadata_document()["raw_data_usage"]["source_bytes"],
+                    "device": record.source_device,
+                    "format": record.source_format,
+                    "sha256": record.source_sha256,
+                    "waveform": {
+                        "lead_order": list(record.metadata_document()["waveform"]["lead_order"]),
+                        "sample_rate_hz": record.sample_rate_hz,
+                        "sample_count_per_lead": int(record.signals_mv.shape[1]),
+                        "unit": "mV",
+                    },
+                },
+                "device_generated": {
+                    "status": "unverified_device_output",
+                    "measurements_available": bool(record.machine_measurements),
+                    "interpretation_available": bool(record.machine_interpretation),
+                },
+                "specter_derived": {
+                    "status": deterministic_measurements.get("analysis_status", "unknown"),
+                    "method": deterministic_measurements.get("method"),
+                    "source_lead": deterministic_measurements.get("source_lead"),
+                },
+                "research_models": {
+                    "status": "complete" if any(item.status == "complete" for item in results) else "unavailable",
+                    "models": [item.model_id for item in results],
+                },
+                "medgemma_context": {
+                    "status": "structured_context_only",
+                    "waveform_samples_sent": False,
+                    "role": "constrained explanation and patient-context layer",
+                },
+            },
             "raw_data_usage": {
                 **record.metadata_document()["raw_data_usage"],
                 **{
@@ -195,6 +238,30 @@ class ECGPipeline:
         self._write_analysis(archived["root"], payload)
         self.publish_analysis(record.patient_id, payload)
         return payload
+
+    def import_wfdb(
+        self,
+        path: str | Path,
+        *,
+        patient_id: str,
+        study_id: str,
+        acquired_at_utc: str,
+        source_device: str,
+        dataset_id: str,
+        dataset_version: str,
+        dataset_license: str,
+    ) -> dict[str, Any]:
+        record, bundle = WFDBImporter().load(
+            path,
+            patient_id=patient_id,
+            study_id=study_id,
+            acquired_at_utc=acquired_at_utc,
+            source_device=source_device,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            dataset_license=dataset_license,
+        )
+        return self.analyze_record(record, bundle)
 
     def _archive_rejected(self, source_name: str, raw: bytes, error: str) -> str:
         digest = hashlib.sha256(raw).hexdigest()
@@ -351,6 +418,24 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode", required=True)
     import_parser = subparsers.add_parser("import", help="import and analyze one XML file from the inbox")
     import_parser.add_argument("path")
+    wfdb_import = subparsers.add_parser(
+        "import-wfdb", help="import an explicitly identified public 12-lead WFDB record"
+    )
+    synthetic = subparsers.add_parser(
+        "make-synthetic-xml",
+        help="convert a public 12-lead WFDB record into a non-vendor SPECTER fixture",
+    )
+    for target in (wfdb_import, synthetic):
+        target.add_argument("path", help="WFDB record base path or .hea path")
+        target.add_argument("--patient-id", required=True)
+        target.add_argument("--study-id", required=True)
+        target.add_argument("--acquired-at", required=True, help="ISO-8601 timestamp including time zone")
+        target.add_argument("--device", required=True, help="source recorder/device attribution")
+        target.add_argument("--dataset-id", required=True)
+        target.add_argument("--dataset-version", required=True)
+        target.add_argument("--dataset-license", required=True)
+    synthetic.add_argument("--output", required=True)
+    synthetic.add_argument("--label", action="append", default=[])
     subparsers.add_parser("status", help="verify model registry and artifacts")
     validation = subparsers.add_parser("validate-dataset", help="validate an offline evaluation manifest")
     validation.add_argument("manifest")
@@ -380,6 +465,33 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.process(args.path)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["status"] in {"complete", "models_unavailable"} else 2
+        if args.mode in {"import-wfdb", "make-synthetic-xml"}:
+            loader_args = {
+                "patient_id": args.patient_id,
+                "study_id": args.study_id,
+                "acquired_at_utc": args.acquired_at,
+                "source_device": args.device,
+                "dataset_id": args.dataset_id,
+                "dataset_version": args.dataset_version,
+                "dataset_license": args.dataset_license,
+            }
+            if args.mode == "import-wfdb":
+                result = pipeline.import_wfdb(args.path, **loader_args)
+                print(json.dumps(result, indent=2, sort_keys=True))
+                return 0 if result["status"] in {"complete", "models_unavailable"} else 2
+            destination = Path(args.output)
+            if destination.exists():
+                raise ECGImportError("synthetic output already exists")
+            record, _bundle = WFDBImporter().load(args.path, **loader_args)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(export_specter_synthetic_xml(record, labels=args.label))
+            print(json.dumps({
+                "status": "created",
+                "output": str(destination),
+                "vendor_compatibility": "none",
+                "source_sha256": record.source_sha256,
+            }, indent=2, sort_keys=True))
+            return 0
         if args.mode == "status":
             status = pipeline.registry.status()
             print(json.dumps(status, indent=2, sort_keys=True))

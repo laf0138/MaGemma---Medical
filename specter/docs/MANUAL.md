@@ -821,7 +821,7 @@ journalctl -u specter-thermal -n 100
 ## 7.3 Specified but not built
 
 - ❌ **PATIENT screen** — the flowsheet dashboard exists as a design spec and a rendered mockup, not as working code wired to MQTT. The data it needs (raw vitals plus MAP/pulse pressure/shock index/NEWS2/qSOFA/fever burden/Δ-from-baseline) is now real and published to `shtf/medical/derived/<patient_id>` (Part 7.1) - what's missing is the screen itself, not the numbers behind it.
-- ⚠️ **Canonical seven-part 12-lead ECG pipeline — software integrated, artifacts/hardware not commissioned.** The locked combination is: **(1) Biocare iE300** acquisition, **(2) DeepECG-SL** primary research classifier, **(3) AntonioR92** six-label regression baseline, **(4) ECG-XPLAIM** later explainable secondary model, **(5) PTB-XL plus other external datasets** as the test corpus, **(6) MedGemma** as the constrained explanation/context layer, and **(7) ExChanGeAI concepts** for evaluation and ONNX model lifecycle management. SPECTER now has strict 12-lead XML ingestion, untouched-source archiving, unit/lead/sample-rate/quality gates, model-specific preprocessing, hash-pinned isolated runners, an atomic model/ONNX registry, patient-split dataset validation, explicit disagreement records, retained MQTT results, MedGemma prompt integration, dashboard state routing, service/ACL/config/install wiring, and focused tests. It remains disabled by default because no real Biocare XML, model artifacts or datasets were supplied. DeepECG's inspected EfficientNet release also lacks published thresholds, and the ECG-XPLAIM task is not yet chosen, so the software refuses to manufacture those details. See [ECG_AI_IMPLEMENTATION_STATUS.md](ECG_AI_IMPLEMENTATION_STATUS.md) for the exact commissioning gates. Until hardware-specific and clinician-reviewed validation passes, every output remains **RESEARCH ONLY / NOT FOR DIAGNOSIS** and may not drive treatment or autonomous alerts.
+- ⚠️ **Canonical seven-part 12-lead ECG pipeline — software integrated, artifacts/hardware not commissioned.** The locked combination is: **(1) Biocare iE300** acquisition, **(2) DeepECG-SL** primary research classifier, **(3) AntonioR92** six-label regression baseline, **(4) ECG-XPLAIM** later explainable secondary model, **(5) PTB-XL plus other external datasets** as the test corpus, **(6) MedGemma** as the constrained explanation/context layer, and **(7) ExChanGeAI concepts** for evaluation and ONNX model lifecycle management. SPECTER now has separate strict generic XML, HL7 aECG, and public WFDB ingestion paths; source-rate preservation through 8,000 Hz; evidence archiving; unit/lead/sample-rate/quality gates; explicitly non-vendor synthetic fixtures; model-specific preprocessing; hash-pinned isolated runners; an atomic model/ONNX registry; patient-split dataset validation; explicit disagreement records; retained MQTT results; source-aware MedGemma prompt integration; and an authenticated `/ecg` attribution screen. It remains disabled by default because no real Biocare XML, model artifacts or datasets were supplied. The generic/synthetic XML paths are not represented as Biocare-compatible. DeepECG's inspected EfficientNet release also lacks published thresholds, and the ECG-XPLAIM task is not yet chosen, so the software refuses to manufacture those details. See [ECG_AI_IMPLEMENTATION_STATUS.md](ECG_AI_IMPLEMENTATION_STATUS.md) for the exact commissioning gates. Until hardware-specific and clinician-reviewed validation passes, every output remains **RESEARCH ONLY / NOT FOR DIAGNOSIS** and may not drive treatment or autonomous alerts.
 - ❌ **Node 3/4/6 workloads** — GNU Radio flowgraphs, KrakenSDR DF calibration, passive radar DSP, Pi-Star/MMDVM config, FCC ID automation. Node roles are assigned; the software is not written.
 - ❌ **Hailo signal classification** — AI HAT+ 2 hardware is specified, the AMC model on RadioML is not implemented.
 - ❌ **Cold chain telemetry** — the BougeRV has no data output. Temperature logging is manual unless you add a separate BLE thermometer.
@@ -934,6 +934,19 @@ python3 /opt/specter/medical/specter_medical_ai.py --ask "QUESTION" --patient op
 python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json status
 python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json import EXAM.xml
 
+# Import a licensed public 12-lead WFDB record without calling it Biocare data
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json import-wfdb /data/ptb-xl/records100/00000/00001_lr \
+  --patient-id DATASET-PATIENT-ID --study-id 00001_lr \
+  --acquired-at 2000-01-01T00:00:00Z --device "PTB-XL source recorder" \
+  --dataset-id ptb-xl --dataset-version 1.0.3 --dataset-license "ODbL 1.0"
+
+# Generate a plumbing fixture; output declares vendorCompatibility=none
+python3 /opt/specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json make-synthetic-xml /data/ptb-xl/records100/00000/00001_lr \
+  --patient-id SYNTHETIC-PTB-1 --study-id 00001_lr \
+  --acquired-at 2000-01-01T00:00:00Z --device "PTB-XL source recorder" \
+  --dataset-id ptb-xl --dataset-version 1.0.3 --dataset-license "ODbL 1.0" \
+  --output /mnt/specter/live/ecg/inbox/ptb-fixture.xml
+
 # Trauma
 python3 /opt/specter/trauma/specter_trauma.py --print-protocol > march_card.txt
 python3 /opt/specter/trauma/specter_trauma_monitor.py --mqtt-host 192.168.1.1
@@ -942,6 +955,7 @@ python3 /opt/specter/trauma/specter_trauma_monitor.py --mqtt-host 192.168.1.1
 https://192.168.1.1           Dashboard (operator login required)
 https://192.168.1.1/resus     RESUS screens (demo, not live - Part 7.2)
 https://192.168.1.1/ward      WARD screen (live)
+https://192.168.1.1/ecg       12-lead ECG research review (structured results; no waveform arrays)
 http://192.168.1.5:8080       Kiwix library
 http://192.168.1.10:11434     Ollama API
 ```

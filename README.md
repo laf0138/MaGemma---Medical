@@ -31,8 +31,11 @@ hardware or the experimental ECG measurements clinically validated.
 ## Twelve-lead ECG research pipeline
 
 The Biocare/DeepECG-SL/AntonioR92/ECG-XPLAIM/PTB-XL/MedGemma/ONNX path is
-integrated but ships safely disabled until exact hardware exports, model files,
-hashes, task labels and datasets are provisioned:
+integrated. Strict HL7 aECG and public WFDB adapters, explicit source rates up
+to 8,000 Hz, and unmistakably non-vendor synthetic fixtures are available for
+offline software evaluation. The Biocare vendor profile and research models
+ship safely disabled until exact hardware exports, model files, hashes, task
+labels and datasets are provisioned:
 
 ```bash
 python specter/medical/specter_ecg_ai.py --config /etc/specter/specter.json status
